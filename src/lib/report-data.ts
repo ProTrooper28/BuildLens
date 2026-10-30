@@ -135,6 +135,41 @@ export interface Claim {
   claim: string;
   verified: boolean;
   evidence: string | null;
+  /** Where the claim came from: `PPT`, `PDF`, `README`, `SUBMISSION`. */
+  source?: string | null;
+  /** `Slide 6`, `README.md — Features`, … */
+  sourceLocation?: string | null;
+  /** Deterministic verdict from the registered claim pipeline. */
+  status?: string | null;
+  /** Why that verdict was assigned, in plain language. */
+  reason?: string | null;
+  category?: string | null;
+  /** Where the claim appeared — several sources are merged into one row. */
+  sources?: { source: string; location: string | null }[] | undefined;
+}
+
+export interface ClaimCounts {
+  total: number;
+  supported: number;
+  partial: number;
+  unsupported: number;
+  could_not_verify: number;
+  unverified: number;
+}
+
+/** Extraction → dedup → registration bookkeeping for one report. */
+export interface ClaimPipeline {
+  deck: number;
+  readme: number;
+  repository: number;
+  extracted: number;
+  deduped: number;
+  registered: number;
+  verified: number;
+  /** Points the claim set pulls off the overall score (0 or negative). */
+  deduction: number;
+  /** Set when claims were extracted but none reached registration. */
+  error: string | null;
 }
 
 export interface RepositoryDetail {
@@ -298,6 +333,8 @@ export interface ReportView {
   repository: RepositoryDetail | null;
   website: WebsiteDetail | null;
   claims: Claim[];
+  claimCounts: ClaimCounts;
+  claimPipeline: ClaimPipeline | null;
   documentAnalysis: DocumentAnalysisView | null;
   innovation: InnovationDetail | null;
   timeline: { time: string; event: string }[];
@@ -448,13 +485,76 @@ function normalizeClaims(value: unknown): Claim[] {
     .map((item): Claim | null => {
       const claim = firstString(item["claim"], item["title"], item["feature"]);
       if (!claim) return null;
+      const status = firstString(item["status"], item["verification_status"]);
+      const sources = asRecordArray(item["sources"])
+        .map((entry) => ({
+          source: firstString(entry["source"]) ?? "",
+          location: firstString(entry["location"]),
+        }))
+        .filter((entry) => entry.source !== "");
       return {
         claim,
-        verified: asBoolean(item["verified"]) ?? false,
+        // A claim counts as verified only on an explicit supported verdict —
+        // never because the claim itself appeared somewhere.
+        verified: status ? status === "supported" : (asBoolean(item["verified"]) ?? false),
         evidence: firstString(item["evidence"], item["detail"], item["proof"]),
+        source: firstString(item["source"]),
+        sourceLocation: firstString(item["source_location"], item["sourceLocation"]),
+        status: status ?? null,
+        reason: firstString(item["reason"], item["verification_reason"]),
+        category: firstString(item["category"]),
+        sources: sources.length > 0 ? sources : undefined,
       };
     })
     .filter((item): item is Claim => item !== null);
+}
+
+function normalizeClaimCounts(value: unknown, claims: readonly Claim[]): ClaimCounts {
+  const record = asRecord(value);
+  const count = (key: string, fallback: number) =>
+    typeof record[key] === "number" && Number.isFinite(record[key])
+      ? (record[key] as number)
+      : fallback;
+  const derived: ClaimCounts = {
+    total: claims.length,
+    supported: claims.filter((claim) => claim.verified).length,
+    partial: 0,
+    unsupported: 0,
+    could_not_verify: 0,
+    unverified: 0,
+  };
+  for (const claim of claims) {
+    if (claim.status === "partial") derived.partial += 1;
+    else if (claim.status === "unsupported") derived.unsupported += 1;
+    else if (claim.status === "could_not_verify") derived.could_not_verify += 1;
+    else if (claim.status === "unverified" || claim.status === null) derived.unverified += 1;
+  }
+  return {
+    total: count("total", derived.total),
+    supported: count("supported", derived.supported),
+    partial: count("partial", derived.partial),
+    unsupported: count("unsupported", derived.unsupported),
+    could_not_verify: count("could_not_verify", derived.could_not_verify),
+    unverified: count("unverified", derived.unverified),
+  };
+}
+
+function normalizeClaimPipeline(value: unknown): ClaimPipeline | null {
+  const record = asRecord(value);
+  if (Object.keys(record).length === 0) return null;
+  const num = (key: string) =>
+    typeof record[key] === "number" && Number.isFinite(record[key]) ? (record[key] as number) : 0;
+  return {
+    deck: num("deck"),
+    readme: num("readme"),
+    repository: num("repository"),
+    extracted: num("extracted"),
+    deduped: num("deduped"),
+    registered: num("registered"),
+    verified: num("verified"),
+    deduction: num("deduction"),
+    error: firstString(record["error"]),
+  };
 }
 
 function normalizeDocumentClaims(value: unknown): DocumentClaimsView | null {
@@ -771,6 +871,10 @@ export function normalizeReportData(raw: unknown): ReportView {
       }, {}),
   );
 
+  const claims = normalizeClaims(data["claims"] ?? data["features"]);
+  const claimCounts = normalizeClaimCounts(data["claim_counts"] ?? data["claimCounts"], claims);
+  const claimPipeline = normalizeClaimPipeline(data["claim_pipeline"] ?? data["claimPipeline"]);
+
   const view: ReportView = {
     executiveSummary,
     overview: {
@@ -840,7 +944,9 @@ export function normalizeReportData(raw: unknown): ReportView {
     scores,
     repository,
     website,
-    claims: normalizeClaims(data["features"] ?? data["claims"]),
+    claims,
+    claimCounts,
+    claimPipeline,
     documentAnalysis: normalizeDocumentAnalysis(documentAnalysisRaw),
     innovation,
     timeline: normalizeTimeline(data["timeline"]),

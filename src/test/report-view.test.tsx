@@ -164,7 +164,9 @@ describe("report page", () => {
     expect(await screen.findByText(/not automatically verified facts/i)).toBeInTheDocument();
     expect(screen.getByText(/Farmers cannot see soil moisture in real time/)).toBeInTheDocument();
     expect(screen.getByText(/We reduced water usage by 30%/)).toBeInTheDocument();
-    expect(screen.getByText(/aquasense\.pptx/)).toBeInTheDocument();
+    // The file name now appears twice on purpose: in the "Documents processed"
+    // pipeline stage and in the document analysis section.
+    expect(screen.getAllByText(/aquasense\.pptx/).length).toBeGreaterThan(0);
   }, 20000);
 
   it("does not present an in-progress report as finished", async () => {

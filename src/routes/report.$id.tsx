@@ -1,5 +1,5 @@
 import { createFileRoute, Link, useRouter } from "@tanstack/react-router";
-import { useEffect, useState, useMemo, lazy, Suspense } from "react";
+import { useEffect, useState, useMemo, lazy, Suspense, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import { motion } from "framer-motion";
 import {
@@ -7,6 +7,7 @@ import {
   Bot,
   CheckCircle2,
   Check,
+  ChevronDown,
   CircuitBoard,
   ClipboardCheck,
   Copy,
@@ -70,6 +71,7 @@ import { isSupabaseConfigured } from "@/lib/supabase";
 import {
   normalizeReportData,
   normalizeReportStatus,
+  type Claim,
   type DocumentClaimsView,
   type ReportView,
   type RiskSeverity,
@@ -141,6 +143,104 @@ function formatDate(value: string | undefined): string {
 }
 
 const listIcon = "mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-primary";
+
+/** Verdict presentation for one registered claim. Honest vocabulary only. */
+function claimVerdict(claim: Claim): {
+  key: string;
+  label: string;
+  className: string;
+  icon: ReactNode;
+} {
+  const status = claim.status ?? (claim.verified ? "supported" : "unverified");
+  switch (status) {
+    case "supported":
+      return {
+        key: status,
+        label: "Supported",
+        className: "border-success/30 bg-success/10 text-success",
+        icon: <CheckCircle2 className="h-4 w-4 shrink-0 text-success" />,
+      };
+    case "partial":
+      return {
+        key: status,
+        label: "Partial",
+        className: "border-warning/30 bg-warning/10 text-warning",
+        icon: <AlertTriangle className="h-4 w-4 shrink-0 text-warning" />,
+      };
+    case "unsupported":
+      return {
+        key: status,
+        label: "Not supported",
+        className: "border-destructive/30 bg-destructive/10 text-destructive",
+        icon: <XCircle className="h-4 w-4 shrink-0 text-destructive" />,
+      };
+    case "could_not_verify":
+      return {
+        key: status,
+        label: "Could not verify",
+        className: "border-border bg-muted/40 text-muted-foreground",
+        icon: <Info className="h-4 w-4 shrink-0 text-muted-foreground" />,
+      };
+    default:
+      return {
+        key: status,
+        label: "Unverified",
+        className: "border-border bg-muted/40 text-muted-foreground",
+        icon: <Info className="h-4 w-4 shrink-0 text-muted-foreground" />,
+      };
+  }
+}
+
+/** `PPT — Slide 6 · README` — every source the claim was found in. */
+function claimSourceLabel(claim: Claim): string | null {
+  if (claim.sources && claim.sources.length > 0) {
+    return claim.sources
+      .map((source) => (source.location ? `${source.source} — ${source.location}` : source.source))
+      .join(" · ");
+  }
+  if (!claim.source) return null;
+  return claim.sourceLocation ? `${claim.source} — ${claim.sourceLocation}` : claim.source;
+}
+
+/** One expandable claim row: verdict up top, evidence and reason when opened. */
+function ClaimRow({ claim }: { claim: Claim }) {
+  const verdict = claimVerdict(claim);
+  const source = claimSourceLabel(claim);
+  return (
+    <li>
+      <details className="group rounded-lg border border-border/70 bg-card/40 px-3 py-2.5">
+        <summary className="flex cursor-pointer list-none items-start gap-3 [&::-webkit-details-marker]:hidden">
+          {verdict.icon}
+          <span className="min-w-0 flex-1 text-sm font-medium leading-snug">{claim.claim}</span>
+          <Badge variant="outline" className={`shrink-0 text-[11px] ${verdict.className}`}>
+            {verdict.label}
+          </Badge>
+          <ChevronDown className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
+        </summary>
+        <dl className="mt-2 space-y-1.5 border-t border-border/60 pt-2 text-xs">
+          {source && (
+            <div className="flex gap-2">
+              <dt className="w-24 shrink-0 text-muted-foreground">Source</dt>
+              <dd className="text-foreground/90">{source}</dd>
+            </div>
+          )}
+          {claim.evidence && (
+            <div className="flex gap-2">
+              <dt className="w-24 shrink-0 text-muted-foreground">Evidence</dt>
+              <dd className="text-foreground/90">{claim.evidence}</dd>
+            </div>
+          )}
+          {claim.reason && (
+            <div className="flex gap-2">
+              <dt className="w-24 shrink-0 text-muted-foreground">Reason</dt>
+              <dd className="text-foreground/90">{claim.reason}</dd>
+            </div>
+          )}
+        </dl>
+      </details>
+    </li>
+  );
+}
 
 /** Sections the page opens by default. */
 const DEFAULT_OPEN_SECTIONS = ["verdict", "summary", "overview", "risks", "recommendations"];
@@ -520,18 +620,53 @@ function Report() {
       : null);
   const band = scoreBand(overall);
   const verifiedClaims = view.claims.filter((c) => c.verified).length;
+  const claimCounts = view.claimCounts;
+  const claimPipeline = view.claimPipeline;
+  const claimsRegistered = claimCounts.total > 0;
   const dimensions = scoreDimensions({ ...view, scores: { ...view.scores, overall } });
   const scoredDimensions = dimensions.filter((d) => d.score !== null);
   const findings = view.risks.length > 0 ? view.risks : view.security.findings;
 
   // Pipeline states come from what the report actually contains — never faked.
   const running = status.kind === "in_progress";
+  const claimStageState = (done: boolean): PipelineStage["state"] =>
+    done ? "done" : running ? "active" : claimPipeline?.error ? "error" : "pending";
   const pipelineStages: PipelineStage[] = [
     {
       label: "Evidence gathered",
       icon: <ShieldCheck className="h-3.5 w-3.5" />,
       state:
         view.hasPayloadData || view.claims.length > 0 ? "done" : running ? "active" : "pending",
+    },
+    {
+      label: "Documents processed",
+      icon: <FileText className="h-3.5 w-3.5" />,
+      detail: view.documentAnalysis
+        ? `${view.documentAnalysis.fileName ?? "Submitted document"} read — ${claimPipeline?.deck ?? view.claims.filter((c) => c.source === "PPT" || c.source === "PDF").length} claims from it`
+        : "No document was attached to this submission",
+      state: view.documentAnalysis
+        ? "done"
+        : view.hasPayloadData
+          ? "done"
+          : running
+            ? "active"
+            : "pending",
+    },
+    {
+      label: "Claims extracted",
+      icon: <ClipboardCheck className="h-3.5 w-3.5" />,
+      detail: claimPipeline
+        ? `${claimPipeline.extracted} extracted (${claimPipeline.deck} deck + ${claimPipeline.readme} README) · ${claimPipeline.deduped} merged`
+        : `${claimCounts.total} registered claims`,
+      state: claimStageState(claimPipeline ? claimPipeline.extracted > 0 : claimsRegistered),
+    },
+    {
+      label: "Claims verified",
+      icon: <ListChecks className="h-3.5 w-3.5" />,
+      detail: claimPipeline
+        ? `${claimPipeline.verified} of ${claimPipeline.registered} claims decided against the evidence`
+        : `${verifiedClaims} of ${claimCounts.total} verified`,
+      state: claimStageState(claimPipeline ? claimPipeline.verified > 0 : verifiedClaims > 0),
     },
     {
       label: "Repository analyzed",
@@ -690,17 +825,42 @@ function Report() {
             <AmbientCard className="surface flex h-full items-center gap-6 p-6">
               <ScoreRing value={view.scores.evidence} label="/ 100" />
               <div className="min-w-0">
-                <p className="text-sm text-muted-foreground">Evidence Score</p>
-                <p className="mt-1 text-lg font-semibold">
-                  {view.claims.length > 0
-                    ? `${verifiedClaims} of ${view.claims.length} claims verified`
-                    : "No claims recorded"}
-                </p>
-                <p className="mt-2 text-xs text-muted-foreground">
-                  {view.claims.length > 0
-                    ? `${view.claims.length - verifiedClaims} unverified — see Claim Verification`
-                    : "Claim verification runs with the analysis."}
-                </p>
+                <p className="text-sm text-muted-foreground">Claim verification</p>
+                {claimPipeline?.error ? (
+                  <>
+                    <p className="mt-1 text-lg font-semibold text-destructive">Pipeline error</p>
+                    <p className="mt-2 text-xs text-destructive">{claimPipeline.error}</p>
+                  </>
+                ) : claimsRegistered ? (
+                  <>
+                    <p className="mt-1 text-lg font-semibold">
+                      {claimCounts.total} claim{claimCounts.total === 1 ? "" : "s"} analyzed
+                    </p>
+                    <ul className="mt-2 space-y-0.5 text-xs">
+                      <li className="text-success">✓ {claimCounts.supported} supported</li>
+                      <li className="text-warning">⚠ {claimCounts.partial} partially supported</li>
+                      <li className="text-destructive">
+                        ✕ {claimCounts.unsupported} not supported
+                      </li>
+                      {claimCounts.could_not_verify > 0 && (
+                        <li className="text-muted-foreground">
+                          ? {claimCounts.could_not_verify} could not be verified
+                        </li>
+                      )}
+                    </ul>
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      Full table in Claim Verification — each claim opens to its evidence.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <p className="mt-1 text-lg font-semibold">No claims extracted</p>
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      The submitted materials contained no readable claims (no deck text and no
+                      README assertions), so there was nothing to verify.
+                    </p>
+                  </>
+                )}
               </div>
             </AmbientCard>
           </StaggerItem>
@@ -1480,7 +1640,7 @@ function Report() {
               </ReportSection>
             )}
 
-            {view.claims.length > 0 && (
+            {(view.claims.length > 0 || claimPipeline?.error) && (
               <ReportSection
                 value="claims"
                 title="Claim Verification"
@@ -1488,35 +1648,34 @@ function Report() {
                 count={view.claims.length}
                 tone="warning"
               >
-                <ul className="space-y-4">
-                  {view.claims.map((claim, i) => (
-                    <motion.li
-                      key={`${claim.claim}-${i}`}
-                      initial={{ opacity: 0, x: -4 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      transition={{ delay: i * 0.05 }}
-                      className="flex gap-3"
-                    >
-                      {claim.verified ? (
-                        <CheckCircle2 className="h-5 w-5 shrink-0 text-success" />
-                      ) : (
-                        <XCircle className="h-5 w-5 shrink-0 text-destructive" />
+                {claimPipeline?.error ? (
+                  <p className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+                    <strong>Pipeline error:</strong> {claimPipeline.error}
+                  </p>
+                ) : (
+                  <>
+                    <p className="text-sm text-muted-foreground">
+                      {claimCounts.total} claim{claimCounts.total === 1 ? "" : "s"} extracted from
+                      the submitted document and the repository README, deduplicated and checked
+                      against the inspected evidence: {claimCounts.supported} supported,{" "}
+                      {claimCounts.partial} partially supported, {claimCounts.unsupported} not
+                      supported, {claimCounts.could_not_verify} could not be verified. A statement
+                      in the PPT or README is a claim, never proof.
+                      {claimPipeline && claimPipeline.deduction !== 0 && (
+                        <>
+                          {" "}
+                          This claim set moves the overall score by {claimPipeline.deduction} point
+                          {Math.abs(claimPipeline.deduction) === 1 ? "" : "s"}.
+                        </>
                       )}
-                      <div>
-                        <p className="font-medium">{claim.claim}</p>
-                        {claim.evidence && (
-                          <p className="text-sm text-muted-foreground">{claim.evidence}</p>
-                        )}
-                      </div>
-                      <Badge
-                        variant="outline"
-                        className={`ml-auto self-start ${claim.verified ? "border-success/30 bg-success/10 text-success" : "border-destructive/30 bg-destructive/10 text-destructive"}`}
-                      >
-                        {claim.verified ? "Verified" : "Unverified"}
-                      </Badge>
-                    </motion.li>
-                  ))}
-                </ul>
+                    </p>
+                    <ul className="mt-4 space-y-2">
+                      {view.claims.map((claim, i) => (
+                        <ClaimRow key={`${claim.claim}-${i}`} claim={claim} />
+                      ))}
+                    </ul>
+                  </>
+                )}
               </ReportSection>
             )}
 

@@ -37,6 +37,14 @@ import {
 } from "@/analysis/analyzers/maintainability.analyzer";
 import { computeScoreBreakdown, scoreBand, type DimensionKey } from "@/analysis/score";
 import { documentAnalysisPayloadOf } from "@/services/document";
+import {
+  claimScoreDeduction,
+  computeEvidenceScore,
+  countClaims,
+  registerClaims,
+  type NormalizedClaim,
+  type RegisteredClaims,
+} from "@/services/claims";
 
 const TOTAL_BUDGET_MS = 45_000;
 
@@ -94,6 +102,27 @@ interface PayloadContext {
   maintainability: MaintainabilityAnalysis | null;
   score: number | null;
   breakdown: ReturnType<typeof computeScoreBreakdown> | null;
+  /** Claims extracted + registered + verified so far (null until that stage runs). */
+  registeredClaims: RegisteredClaims | null;
+}
+
+/** Registered claim → the payload shape the report reads. */
+function claimPayload(claim: NormalizedClaim): Json {
+  return {
+    id: claim.id,
+    claim: claim.claim,
+    source: claim.source,
+    source_location: claim.sourceLocation,
+    sources: claim.sources.map((entry) => ({
+      source: entry.source,
+      location: entry.location,
+    })),
+    evidence: claim.evidence,
+    category: claim.category,
+    confidence: claim.confidence,
+    status: claim.verificationStatus,
+    reason: claim.verificationReason,
+  } as Json;
 }
 
 /** Build the `report_data` payload from whatever stages have completed. */
@@ -115,7 +144,10 @@ function buildReportData(context: PayloadContext): Json {
     maintainability,
     score,
     breakdown,
+    registeredClaims,
   } = context;
+
+  const claims = registeredClaims?.claims ?? [];
 
   const languages = snapshot?.metadata.languages ?? [];
   const frameworks = stack?.frameworks ?? [];
@@ -280,7 +312,7 @@ function buildReportData(context: PayloadContext): Json {
     recommendations,
     scores: {
       overall: score,
-      evidence: null,
+      evidence: computeEvidenceScore(claims),
       codeQuality: quality?.score ?? null,
       security: security?.score ?? null,
       performance: null,
@@ -321,6 +353,12 @@ function buildReportData(context: PayloadContext): Json {
       document_analysis: documentAnalysisPayloadOf(input.document ?? null),
       created_at: input.createdAt,
     },
+    // Registered claims: extracted from the deck and README, deduplicated and
+    // verified against the inspected evidence. The report renders these — an
+    // extracted claim can never be dropped between extraction and the report.
+    claims: claims.map(claimPayload),
+    claim_counts: countClaims(claims),
+    claim_pipeline: registeredClaims?.stats ?? null,
     analysis: {
       state,
       started_at: startedAt,
@@ -395,6 +433,7 @@ export async function runProjectAnalysis({
   let maintainability: MaintainabilityAnalysis | null = null;
   let score: number | null = null;
   let breakdown: ReturnType<typeof computeScoreBreakdown> | null = null;
+  let registeredClaims: RegisteredClaims | null = null;
 
   const emit = (state: "running" | "completed" | "failed", error: AnalysisErrorPayload | null) => {
     const payload = buildReportData({
@@ -414,6 +453,7 @@ export async function runProjectAnalysis({
       maintainability,
       score,
       breakdown,
+      registeredClaims,
     });
     onStages?.(tracker.list);
     return persistence
@@ -502,8 +542,29 @@ export async function runProjectAnalysis({
     );
     await emit("running", null);
 
-    // 7. Scores + report
+    // 7. Claim extraction + registration (deck + README → one verified list)
+    //    Runs before the score so unsupported claims can pull the overall down.
     tracker.set("report", "active");
+    registeredClaims = registerClaims({
+      document: input.document ?? null,
+      readme: snapshot.readme,
+      signals: {
+        filePaths: snapshot.files.map((file) => file.path),
+        frameworks: (stack?.frameworks ?? []).map((framework) => framework.name),
+        languages: snapshot.metadata.languages.map((language) => language.name),
+        readmeText: snapshot.readme?.text ?? null,
+        // The analysis does not fetch the deployed site: runtime evidence is
+        // collected by the inspection pipeline, and is empty here by design.
+        liveEvidence: [],
+      },
+    });
+    for (const line of registeredClaims.stats.log) console.debug(line);
+    if (registeredClaims.stats.error) {
+      limitations.push(registeredClaims.stats.error);
+    }
+    await emit("running", null);
+
+    // 8. Scores + report
     breakdown = computeScoreBreakdown(
       {
         codeQuality: quality.score,
@@ -522,8 +583,20 @@ export async function runProjectAnalysis({
         performance: "Not enough evidence — no run-time performance measurement was performed.",
       },
     );
-    score = breakdown.overall;
-    tracker.set("report", "done", score === null ? "No score" : `Overall ${score}/100`);
+    score =
+      breakdown.overall === null
+        ? null
+        : Math.max(
+            0,
+            Math.min(100, breakdown.overall + claimScoreDeduction(registeredClaims.claims)),
+          );
+    tracker.set(
+      "report",
+      "done",
+      `${registeredClaims.stats.registered} claim${registeredClaims.stats.registered === 1 ? "" : "s"} extracted · ${registeredClaims.stats.verified} verified · ${
+        score === null ? "No score" : `Overall ${score}/100`
+      }`,
+    );
     const reportData = await emit("completed", null);
 
     return {
