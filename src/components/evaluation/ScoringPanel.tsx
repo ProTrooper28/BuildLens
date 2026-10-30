@@ -98,10 +98,7 @@ export function ScoringPanel({
 
   return (
     <Card
-      className={cn(
-        "flex min-w-0 flex-col border-border/70 bg-card/70 backdrop-blur lg:sticky lg:top-20",
-        className,
-      )}
+      className={cn("flex min-w-0 flex-col border-border bg-card lg:sticky lg:top-20", className)}
     >
       <CardHeader className="space-y-3 border-b border-border/70 pb-4">
         <div className="flex items-start justify-between gap-3">
@@ -125,12 +122,12 @@ export function ScoringPanel({
             </div>
           </div>
           {submitted ? (
-            <Badge className="border-success/30 bg-success/10 text-success hover:bg-success/10">
+            <Badge variant="outline" className="border-border text-success">
               <CheckCircle2 className="mr-1 h-3 w-3" aria-hidden />
               Submitted
             </Badge>
           ) : recordStatus === "in_progress" ? (
-            <Badge className="border-warning/30 bg-warning/10 text-warning hover:bg-warning/10">
+            <Badge variant="outline" className="border-border text-warning">
               Draft
             </Badge>
           ) : (

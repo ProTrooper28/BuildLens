@@ -66,7 +66,7 @@ function SourceLine({ source }: { source: ResumeDetail["source"] }) {
 export function ResumePreview({ resume }: { resume: ResumeDetail }) {
   return (
     <div className="space-y-5">
-      <Card className="overflow-hidden border-border/70 bg-card/60 backdrop-blur">
+      <Card className="overflow-hidden border-border/70 bg-card">
         <CardContent className="p-5 sm:p-6">
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div className="min-w-0">
@@ -285,7 +285,7 @@ function PreviewSection({
   children: React.ReactNode;
 }) {
   return (
-    <Card className="border-border/70 bg-card/45 backdrop-blur">
+    <Card className="border-border/70 bg-card">
       <CardHeader className="pb-3">
         <CardTitle className="flex items-center justify-between text-sm font-medium">
           <span className="inline-flex items-center gap-2">
@@ -305,7 +305,7 @@ function PreviewSection({
 export function ProjectPreview({ project }: { project: ProjectDetail }) {
   return (
     <div className="space-y-5">
-      <Card className="overflow-hidden border-border/70 bg-card/60 backdrop-blur">
+      <Card className="overflow-hidden border-border/70 bg-card">
         <CardContent className="p-5 sm:p-6">
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div className="min-w-0">
@@ -377,7 +377,7 @@ export function ProjectPreview({ project }: { project: ProjectDetail }) {
       </Card>
 
       <div className="grid gap-5 sm:grid-cols-2">
-        <Card className="border-border/70 bg-card/45 backdrop-blur">
+        <Card className="border-border/70 bg-card">
           <CardHeader className="pb-3">
             <CardTitle className="text-sm font-medium">Problem statement</CardTitle>
           </CardHeader>
@@ -391,7 +391,7 @@ export function ProjectPreview({ project }: { project: ProjectDetail }) {
             )}
           </CardContent>
         </Card>
-        <Card className="border-border/70 bg-card/45 backdrop-blur">
+        <Card className="border-border/70 bg-card">
           <CardHeader className="pb-3">
             <CardTitle className="text-sm font-medium">Solution</CardTitle>
           </CardHeader>
@@ -405,7 +405,7 @@ export function ProjectPreview({ project }: { project: ProjectDetail }) {
         </Card>
       </div>
 
-      <Card className="border-border/70 bg-card/45 backdrop-blur">
+      <Card className="border-border/70 bg-card">
         <CardHeader className="pb-3">
           <CardTitle className="text-sm font-medium">Media</CardTitle>
         </CardHeader>
@@ -438,7 +438,7 @@ export function ProjectPreview({ project }: { project: ProjectDetail }) {
       </Card>
 
       <div className="grid gap-5 sm:grid-cols-2">
-        <Card className="border-border/70 bg-card/45 backdrop-blur">
+        <Card className="border-border/70 bg-card">
           <CardHeader className="pb-3">
             <CardTitle className="text-sm font-medium">Team</CardTitle>
           </CardHeader>
@@ -460,7 +460,7 @@ export function ProjectPreview({ project }: { project: ProjectDetail }) {
           </CardContent>
         </Card>
 
-        <Card className="border-border/70 bg-card/45 backdrop-blur">
+        <Card className="border-border/70 bg-card">
           <CardHeader className="pb-3">
             <CardTitle className="text-sm font-medium">Submission details</CardTitle>
           </CardHeader>

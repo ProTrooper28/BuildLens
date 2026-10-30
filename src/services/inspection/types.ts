@@ -22,6 +22,13 @@ import type {
   EvidenceSourceReport,
   ObservationStatus,
 } from "@/services/evidence/types";
+import type {
+  DocumentMismatch,
+  FeatureVerification,
+  ScoreBreakdown,
+  SecurityAssessment,
+  Severity,
+} from "@/services/verification/types";
 
 /* ------------------------------------------------------------ project type */
 
@@ -172,6 +179,19 @@ export const INSPECTION_SECTIONS: {
   },
 ];
 
+/**
+ * How one source of evidence treated a single claim. Derived from the same
+ * comparison that produces the claim's overall status, so the judge sees which
+ * part of the evidence carried the claim — and which part could not be read.
+ */
+export interface ClaimCrossCheck {
+  /** Source family, e.g. `Deployment`, `Repository`, `Document`. */
+  source: string;
+  status: ClaimEvidenceStatus;
+  /** One sentence: where it was seen, or why it was not. */
+  detail: string;
+}
+
 /** One finding: what was checked, what was found, and the evidence behind it. */
 export interface InspectionCheck {
   id: string;
@@ -189,6 +209,8 @@ export interface InspectionCheck {
   /** Claim metadata, when the check is a claim. */
   claimKind?: ClaimKind;
   pageRefs?: number[];
+  /** Per-source breakdown, when the check is a claim. */
+  crossChecks?: ClaimCrossCheck[];
 }
 
 export interface InspectionSection {
@@ -236,13 +258,100 @@ export interface DeploymentRow {
   detail: string;
 }
 
+/* ------------------------------------------------------- structured result */
+
+/**
+ * How a deployment result was reached. These four are deliberately distinct and
+ * are shown on the detailed page next to every finding:
+ *
+ *   observed         — BuildLens read it from the served page or response
+ *   inferred         — concluded from what was observed, not read directly
+ *   not_detected     — the check ran and did not find it (never “secure”)
+ *   could_not_verify — the check did not run or could not be completed
+ */
+export const DEPLOYMENT_BASES = [
+  "observed",
+  "inferred",
+  "not_detected",
+  "could_not_verify",
+] as const;
+
+export type DeploymentBasis = (typeof DEPLOYMENT_BASES)[number];
+
+export const DEPLOYMENT_BASIS_LABELS: Record<DeploymentBasis, string> = {
+  observed: "Observed",
+  inferred: "Inferred",
+  not_detected: "Not detected",
+  could_not_verify: "Could not verify",
+};
+
+/** The five areas the deployment inspector reports on, in reading order. */
+export const DEPLOYMENT_AREA_IDS = [
+  "availability",
+  "functionality",
+  "performance",
+  "security",
+  "responsiveness",
+] as const;
+
+export type DeploymentAreaId = (typeof DEPLOYMENT_AREA_IDS)[number];
+
+export const DEPLOYMENT_AREA_LABELS: Record<DeploymentAreaId, string> = {
+  availability: "Availability",
+  functionality: "Functionality",
+  performance: "Performance",
+  security: "Security",
+  responsiveness: "Responsive layout",
+};
+
+/** One deployment finding: what was checked, what was seen, how it was reached. */
+export interface DeploymentCheck {
+  id: string;
+  label: string;
+  status: CheckStatus;
+  basis: DeploymentBasis;
+  /** The measured value or short result (“200 OK”, “420 ms”, “2 failed”). */
+  value: string;
+  /** One sentence a non-technical judge can follow. */
+  detail: string;
+  /** Exact URLs, headers, routes or measurements behind the result. */
+  evidence: string[];
+  confidence: "high" | "medium" | "low";
+}
+
+export interface DeploymentArea {
+  id: DeploymentAreaId;
+  label: string;
+  status: CheckStatus;
+  checks: DeploymentCheck[];
+}
+
+/** What the HTTP request itself showed — null when it could not be measured. */
+export interface DeploymentHttp {
+  status: number | null;
+  finalUrl: string | null;
+  https: boolean | null;
+  redirects: number | null;
+  redirectChain: string[];
+  responseMs: number | null;
+}
+
 export interface DeploymentInspection {
   /** False when this project type does not need a deployed website. */
   applicable: boolean;
   url: string | null;
   /** When the evidence in this object was collected (report build time). */
   checkedAt: string;
+  /** The one-line summary strip shown on the judge screen. */
   rows: DeploymentRow[];
+  /** The structured result: five areas, each with the checks behind it. */
+  areas: DeploymentArea[];
+  /** The HTTP observations the areas were built from. */
+  http: DeploymentHttp;
+  /** Same-origin routes/links that were requested, with their response. */
+  routes: string[];
+  /** Resource failures and oversized assets that were sampled. */
+  resources: string[];
   /** Raw observation results, kept verbatim. */
   observations: string[];
   /** Exact URLs / status lines behind the rows. */
@@ -270,13 +379,47 @@ export interface ClaimCounts {
   could_not_verify: number;
 }
 
+export interface JudgeConcern {
+  text: string;
+  severity: Severity;
+}
+
+export interface FeatureSummary {
+  total: number;
+  supported: number;
+  partial: number;
+  missing: number;
+  unverified: number;
+  tested: number;
+}
+
 export interface JudgeVerdict {
   /** "Strong project, but 2 major claims could not be verified." */
   headline: string;
   tone: VerdictTone;
   toneLabel: string;
-  /** Automated score when a model ran; never invented here. */
+  /** Overall score the model produced, when a model ran; never invented here. */
   score: number | null;
+  /**
+   * Deterministic overall score (0–100), computed from the evidence by
+   * `services/verification/score`. This is the number the judge reads first: it
+   * exists even when no model ran, and it never rewards an unsupported claim.
+   */
+  overallScore: number | null;
+  /** Short band for the overall score (“Strong”, “Mixed”, …). */
+  overallBand: string;
+  /** Per-dimension deterministic scores with their weights and reasons. */
+  breakdown: ScoreBreakdown;
+  /** Two to four sentences the judge can read without opening anything. */
+  executiveSummary: string;
+  /** Concerns in severity order; the first ones are what matter. */
+  keyConcerns: JudgeConcern[];
+  severityCounts: Record<Severity, number>;
+  /** Whether the submitted deck describes this project at all. */
+  mismatch: DocumentMismatch;
+  /** Claimed features with what was found and what was tested. */
+  features: FeatureVerification[];
+  featureSummary: FeatureSummary;
   aiAvailable: boolean;
   counts: ClaimCounts & { total: number };
   claimed: string[];
@@ -314,6 +457,14 @@ export interface InspectionReport {
   sources: EvidenceSourceReport[];
   counts: ClaimCounts & { total: number };
   ai: InspectionAiMeta;
+  /** Feature verification table (also on the verdict). */
+  features: FeatureVerification[];
+  /** Document ↔ project mismatch assessment (also on the verdict). */
+  mismatch: DocumentMismatch;
+  /** Risk-based security assessment behind the security section. */
+  security: SecurityAssessment;
+  /** Deterministic score breakdown behind `verdict.overallScore`. */
+  score: ScoreBreakdown;
   disclaimer: string;
 }
 

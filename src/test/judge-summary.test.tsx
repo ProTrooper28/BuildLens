@@ -128,16 +128,27 @@ function renderSummary(props: { report: typeof report | null; error?: string | n
 }
 
 describe("JudgeSummary", () => {
-  it("leads with a plain-language verdict and links to the detailed analysis", async () => {
+  it("leads with the score, the verdict and the claim and feature tables", async () => {
     renderSummary({ report });
 
-    expect(
-      await screen.findByText(/1 claim could not be fully verified/i),
-    ).toBeInTheDocument();
-    expect(screen.getByText("What the team claims")).toBeInTheDocument();
-    expect(screen.getByText("What BuildLens verified")).toBeInTheDocument();
-    expect(screen.getByText("What the judge should know")).toBeInTheDocument();
-    expect(screen.getByText("Could not be verified")).toBeInTheDocument();
+    expect(await screen.findByText(/1 claim could not be fully verified/i)).toBeInTheDocument();
+    // First screen: score, executive verdict, breakdown, then the two tables.
+    expect(screen.getByText("Overall score")).toBeInTheDocument();
+    expect(screen.getByText("Executive verdict")).toBeInTheDocument();
+    expect(screen.getByText("Score breakdown")).toBeInTheDocument();
+    expect(screen.getByText("Key concerns")).toBeInTheDocument();
+    expect(screen.getByText("Key strengths")).toBeInTheDocument();
+    // "Claim verification" is both a breakdown dimension and the table heading.
+    expect(screen.getAllByText("Claim verification").length).toBeGreaterThan(0);
+    expect(screen.getByText("Feature verification")).toBeInTheDocument();
+    expect(screen.getByText("Verdict")).toBeInTheDocument();
+    expect(screen.getByText("Tested")).toBeInTheDocument();
+    // The claim table names the claim and its verdict, without an accordion.
+    expect(screen.getAllByText("Google authentication for farm managers").length).toBeGreaterThan(
+      0,
+    );
+    expect(screen.getAllByText("Supported").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Could not verify").length).toBeGreaterThan(0);
     expect(screen.getByRole("link", { name: /view detailed analysis/i })).toHaveAttribute(
       "href",
       expect.stringContaining("/analysis"),

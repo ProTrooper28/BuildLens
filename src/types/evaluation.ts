@@ -252,6 +252,21 @@ export interface ProjectDetail extends SubmissionSummary {
   presentationClaims: PresentationClaims | null;
   /** Short per-page text previews, used to cite the slide a claim came from. */
   presentationPages?: { page: number; text: string }[] | null;
+  /**
+   * Present when this project came from the shared hackathon portal.
+   *
+   * The judge page uses it to show the submission's lifecycle and to publish the
+   * result the candidate will see. Declared structurally so the evaluation types
+   * do not import the hackathon model.
+   */
+  sharedSubmission?: {
+    hackathonId: string;
+    hackathonName: string;
+    hackathonCode: string;
+    status: string;
+    resultPublished: boolean;
+    publishedResult: { total: number; maxScore: number; rank: number | null } | null;
+  } | null;
 }
 
 export type SubmissionDetail = ResumeDetail | ProjectDetail;

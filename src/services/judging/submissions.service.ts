@@ -8,9 +8,16 @@ import type {
   SubmissionDetail,
   SubmissionSummary,
 } from "@/types/evaluation";
-import { getGuestProject, listGuestProjects, listGuestReports } from "@/services/guest.service";
-import { getProject, listProjects } from "@/services/project.service";
+import { getGuestProject, listGuestReports } from "@/services/guest.service";
+import { getProject } from "@/services/project.service";
 import { getReport, listReports } from "@/services/report.service";
+import {
+  getSubmissionForJudge,
+  listJudgeHackathons,
+  listJudgeSubmissions,
+  submissionStatusLabel,
+} from "@/services/hackathon.service";
+import { LOCAL_JUDGE_ID } from "@/services/judging/store";
 
 /**
  * The submission pool the judging area ranks.
@@ -19,13 +26,24 @@ import { getReport, listReports } from "@/services/report.service";
  * rows the product already has —
  *
  *   resumes  → reports of type "Developer" (the developer submission) + demo cohort
- *   projects → projects rows (plus their linked report for tech/media)       + demo cohort
+ *   projects → `hackathon_submissions` rows (the exact records the candidate
+ *              portal writes) + legacy project rows
+ *
+ * The project pool is the shared hackathon model: a candidate submits to a
+ * hackathon, and that submission row — with its team, links, deck and report —
+ * is what a judge sees. A judge only ever reads the hackathons they own or are
+ * assigned to, which is what keeps Hackathon A's projects out of Hackathon B.
  *
  * Ids are namespaced (`resume:<id>` / `project:<id>`) so the two pools can never
- * collide, and every summary is derived from already-loaded list rows: the
- * judging pages never transfer a full `report_data` payload until a judge opens
- * one submission.
+ * collide, and the id inside the namespace is the canonical submission id used by
+ * the candidate portal, analysis, evidence, scoring and rankings.
  */
+
+/** Who the judge side should read as: the signed-in user, or the local judge. */
+function judgeViewerId(viewer: { userId: string | null; isGuest: boolean }): string | null {
+  if (viewer.userId) return viewer.userId;
+  return viewer.isGuest ? LOCAL_JUDGE_ID : null;
+}
 
 export function submissionId(category: EvaluationCategory, rawId: string): string {
   return `${category}:${rawId}`;
@@ -146,47 +164,38 @@ export async function fetchSubmissionSummaries(
     return [...fromReports, ...demo];
   }
 
-  const fromProjects: SubmissionSummary[] = [];
+  const fromSubmissions: SubmissionSummary[] = [];
+  const judgeId = judgeViewerId(viewer);
+  let runsRealHackathons = false;
 
-  if (viewer.userId) {
+  if (judgeId) {
     try {
-      for (const project of await listProjects(viewer.userId)) {
-        fromProjects.push({
-          id: submissionId("project", project.id),
+      runsRealHackathons = (await listJudgeHackathons(judgeId)).length > 0;
+      for (const { submission, hackathon } of await listJudgeSubmissions(judgeId)) {
+        fromSubmissions.push({
+          id: submissionId("project", submission.id),
           category: "project",
-          name: project.name,
-          subtitle: null,
-          description: project.description,
+          name: submission.teamName,
+          // The hackathon is part of the row: a judge reviewing two events at
+          // once can still tell which one a project belongs to.
+          subtitle: `${hackathon.name} · ${hackathon.code}`,
+          description: submission.description,
           tags: [],
           yearsExperience: null,
-          projectCategory: project.status === "draft" ? "Draft" : "Submitted",
-          source: "workspace",
-          createdAt: project.created_at,
+          projectCategory: submissionStatusLabel(submission.status),
+          source: viewer.userId ? "workspace" : "guest",
+          createdAt: submission.submittedAt,
         });
       }
     } catch {
-      /* see the resume branch */
+      /* a listing failure must not take the whole judging area down */
     }
   }
 
-  if (viewer.isGuest) {
-    for (const project of listGuestProjects()) {
-      fromProjects.push({
-        id: submissionId("project", project.id),
-        category: "project",
-        name: project.name,
-        subtitle: null,
-        description: project.description,
-        tags: [],
-        yearsExperience: null,
-        projectCategory: "Draft",
-        source: "guest",
-        createdAt: project.created_at,
-      });
-    }
-  }
-
-  return [...fromProjects, ...demo];
+  // The sample cohort is a stand-in for a workspace with no hackathons at all.
+  // An organizer of a real event sees their event's submissions — including an
+  // honest empty state — never sample projects mixed into their queue.
+  return runsRealHackathons ? fromSubmissions : demo;
 }
 
 /* -------------------------------------------------------------------- detail */
@@ -214,6 +223,10 @@ export async function fetchSubmissionDetail(
     }
     const rawId = rawSubmissionId(id);
     if (!rawId) return null;
+    // The shared submission record wins; a legacy workspace project is the
+    // fallback for rows created before hackathons existed.
+    const shared = await sharedProjectDetail(rawId, viewer);
+    if (shared) return shared;
     return projectFromRow(rawId, viewer);
   }
 
@@ -268,6 +281,111 @@ async function resumeFromReport(
     achievements: view.overview.highlights,
     links,
     resumeDocument: null,
+  };
+}
+
+/**
+ * A candidate's hackathon submission as the judge's project detail.
+ *
+ * Every field the judge reads comes from the submission the candidate sent (or
+ * from the report attached to it) — nothing is re-entered by the judge and
+ * nothing is invented. `null` means "this id is not a hackathon submission", so
+ * the caller can fall back to a legacy project row.
+ */
+async function sharedProjectDetail(
+  submissionRowId: string,
+  viewer: { userId: string | null; isGuest: boolean },
+): Promise<ProjectDetail | null> {
+  const judgeId = judgeViewerId(viewer);
+  if (!judgeId) return null;
+
+  const row = await getSubmissionForJudge(submissionRowId, judgeId).catch(() => null);
+  if (!row) return null;
+  const { submission, hackathon } = row;
+
+  let techStack: string[] = [];
+  let summary: string | null = null;
+  let solution: string | null = null;
+  let presentationClaims: PresentationClaims | null = null;
+  let presentationPages: NonNullable<ProjectDetail["presentationPages"]> | null = null;
+
+  // The deck/report the candidate attached. Judges may read it through the
+  // submission policy added in 0007; guests read their own browser journal.
+  const report = submission.reportId
+    ? await getReport(submission.reportId).catch(() => null)
+    : viewer.isGuest
+      ? (listGuestReports().find((entry) => entry.id === submission.reportId) ?? null)
+      : null;
+
+  const reportData = report
+    ? normalizeReportData(report.report_data)
+    : submission.projectId && viewer.isGuest
+      ? (() => {
+          const linked = listGuestReports().find(
+            (entry) => entry.project_id === submission.projectId,
+          );
+          return linked ? normalizeReportData(linked.report_data) : null;
+        })()
+      : null;
+
+  if (reportData) {
+    techStack = reportData.overview.techStack;
+    summary = reportData.executiveSummary ?? reportData.overview.summary;
+    solution = reportData.architecture.summary;
+    presentationClaims = deckClaims(reportData.documentAnalysis?.claims ?? null);
+    presentationPages = deckPages(reportData.documentAnalysis?.pages ?? null);
+  }
+
+  const statusText = submissionStatusLabel(submission.status);
+  const media: ProjectDetail["media"] = [];
+  if (submission.deckName) {
+    media.push({ label: submission.deckName, url: null, kind: "document" });
+  }
+  if (submission.demoUrl) {
+    media.push({ label: "Demo video", url: submission.demoUrl, kind: "video" });
+  }
+
+  return {
+    id: submissionId("project", submission.id),
+    category: "project",
+    source: viewer.userId ? "workspace" : "guest",
+    name: submission.teamName,
+    subtitle: `${hackathon.name} · ${hackathon.code}`,
+    description: submission.description,
+    tags: techStack,
+    yearsExperience: null,
+    projectCategory: statusText,
+    createdAt: submission.submittedAt,
+    team: submission.teamName,
+    problemStatement: null,
+    solution,
+    technologies: techStack,
+    repoUrl: submission.repoUrl,
+    demoUrl: submission.websiteUrl,
+    media,
+    teamMembers: submission.teamMembers.map((name) => ({ name, role: null })),
+    submitted: [
+      { label: "Hackathon", value: `${hackathon.name} (${hackathon.code})` },
+      { label: "Submitted", value: new Date(submission.submittedAt).toLocaleDateString() },
+      { label: "Status", value: statusText },
+      { label: "Report", value: summary ? "Attached" : "None attached" },
+    ],
+    presentationClaims,
+    presentationPages,
+    sharedSubmission: {
+      hackathonId: hackathon.id,
+      hackathonName: hackathon.name,
+      hackathonCode: hackathon.code,
+      status: submission.status,
+      resultPublished: submission.resultPublished,
+      publishedResult: submission.publishedResult
+        ? {
+            total: submission.publishedResult.total,
+            maxScore: submission.publishedResult.maxScore,
+            rank: submission.publishedResult.rank,
+          }
+        : null,
+    },
   };
 }
 
