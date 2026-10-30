@@ -242,6 +242,25 @@ async function requestJson<T>(
   }
 }
 
+/**
+ * Read one file from a public repository (raw content, no credentials).
+ *
+ * Used by the evidence layer to inspect a handful of targeted files (extension
+ * manifest, dependency files, authentication entry points) instead of trusting
+ * a README. Returns null when the file cannot be read, so callers never treat a
+ * failed read as proof of anything.
+ */
+export async function fetchRepositoryFile(
+  ref: RepositoryRef,
+  branch: string,
+  path: string,
+  options: RequestOptions = {},
+): Promise<string | null> {
+  const url =
+    ref.provider === "github" ? githubRawUrl(ref, branch, path) : gitlabRawUrl(ref, branch, path);
+  return requestText(url, options);
+}
+
 async function requestText(url: string, options: RequestOptions): Promise<string | null> {
   try {
     const { body, headers, status } = await request(url, options, "text/plain");

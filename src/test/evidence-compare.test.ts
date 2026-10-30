@@ -25,6 +25,24 @@ const repo: IngestionOutcome = {
 README (README.md):
 # Acme App
 The dashboard analyses climate risk for portfolios and ships a Vitest test suite.`,
+  segments: [
+    { ref: "GitHub: package.json", kind: "config", text: "dependencies: react, vite, vitest" },
+    {
+      ref: "GitHub: src/dashboard.ts",
+      kind: "implementation",
+      text: "export function analyseClimateRisk(holdings) { /* analyses climate risk for every portfolio in the dashboard */ }",
+    },
+    {
+      ref: "GitHub: acme/app file list",
+      kind: "implementation",
+      text: "src/dashboard.ts\nsrc/main.tsx",
+    },
+    {
+      ref: "GitHub: README.md",
+      kind: "documentation",
+      text: "# Acme App\nThe dashboard analyses climate risk for portfolios and ships a Vitest test suite.\n- We also forecast crop yield with TensorFlow models.",
+    },
+  ],
 };
 
 const site: IngestionOutcome = {
@@ -36,6 +54,13 @@ const site: IngestionOutcome = {
   text: `Deployed site: https://acme.example.com/
 Visible text:
 Acme turns climate risk into portfolio actions. We reduced reporting time by 40% for analysts.`,
+  segments: [
+    {
+      ref: "Deployed page: https://acme.example.com/",
+      kind: "runtime",
+      text: "Acme turns climate risk into portfolio actions. We reduced reporting time by 40% for analysts.",
+    },
+  ],
 };
 
 const deck: IngestionOutcome = {
@@ -63,6 +88,19 @@ describe("compareClaims", () => {
     expect(check?.status).toBe("supported");
     expect(check?.sources).toContain("repository");
     expect(check?.quotes.join(" ")).toMatch(/climate risk/);
+    // The judge can open exactly where it came from.
+    expect(check?.evidenceRefs).toContain("GitHub: src/dashboard.ts");
+  });
+
+  it("does not let a README verify a claim on its own", () => {
+    const [check] = compareClaims(
+      [claim("c1", "We also forecast crop yield with TensorFlow models")],
+      [repo],
+    );
+    expect(check?.status).toBe("not_found");
+    expect(check?.note).toMatch(/not proof that the claim is false/i);
+    // For a missing claim the refs list what was searched.
+    expect(check?.evidenceRefs).toContain("GitHub: acme/app");
   });
 
   it("marks a claim partially supported when only part appears", () => {
@@ -153,6 +191,28 @@ describe("buildEvidenceBundle", () => {
     expect(total).toBe(bundle.claims.length);
     expect(bundle.counts.supported).toBeGreaterThan(0);
     expect(bundle.disclaimer).toMatch(/not a negative finding/i);
+  });
+
+  it("cites the deck page a claim was found on", () => {
+    const bundle = buildEvidenceBundle(
+      {
+        ...submission,
+        presentation: {
+          ...submission.presentation,
+          pages: [
+            { page: 2, text: "Problem\nAnalysts cannot see portfolio climate exposure in one place" },
+            { page: 7, text: "Technology\nBuilt with React and TensorFlow" },
+          ],
+        },
+      },
+      [repo, site, deck],
+    );
+
+    expect(bundle.claims.find((entry) => entry.id === "deck.problem.0")?.pageRefs).toEqual([2]);
+    // No page contains this claim, so no page is guessed.
+    expect(bundle.claims.find((entry) => entry.claim === "40% faster reporting")?.pageRefs).toEqual(
+      [],
+    );
   });
 
   it("records unreadable sources as gaps without inventing data", () => {

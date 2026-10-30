@@ -19,6 +19,7 @@
  */
 
 import type { EvaluationSubmission } from "@/services/evaluation-agent/schema";
+import type { EvidenceObservation, EvidenceSegment } from "@/services/evidence/types";
 
 export type IngestionKind = "document" | "website" | "repository";
 
@@ -35,6 +36,18 @@ export interface IngestionOutcome {
   facts?: string[];
   /** The URL this source was read from, when there is one. */
   url?: string | null;
+  /**
+   * Structured checks behind the facts — what was checked, what was found and
+   * the exact evidence (URL, header, file path). Produced only by the source
+   * readers, so the judge UI can show them without asking the model.
+   */
+  observations?: EvidenceObservation[];
+  /**
+   * The same evidence split by where it came from, so claim comparison can
+   * require implementation/runtime support and cite a file path or URL. A
+   * README is a `documentation` segment and never verifies a claim on its own.
+   */
+  segments?: EvidenceSegment[];
 }
 
 export interface EvidenceIngestor {

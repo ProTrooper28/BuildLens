@@ -10,7 +10,14 @@
  */
 
 export * from "./types";
-export { claimsFromSubmission, buildEvidenceBundle } from "./bundle";
+export {
+  claimsFromSubmission,
+  buildEvidenceBundle,
+  claimsFromDocumentation,
+  claimNatureOf,
+  isNearDuplicateClaim,
+} from "./bundle";
 export { compareClaims, assembleBundle, sourcesFromOutcomes, type ClaimInput } from "./compare";
+export { EVIDENCE_CONCEPTS, type EvidenceConcept } from "./concepts";
 export { repositoryEvidence } from "./repository-source";
 export { websiteEvidence } from "./website-source";

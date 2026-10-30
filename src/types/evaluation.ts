@@ -250,6 +250,8 @@ export interface ProjectDetail extends SubmissionSummary {
   submitted: { label: string; value: string }[];
   /** Deck claims extracted from the attached report, when it carried a deck. */
   presentationClaims: PresentationClaims | null;
+  /** Short per-page text previews, used to cite the slide a claim came from. */
+  presentationPages?: { page: number; text: string }[] | null;
 }
 
 export type SubmissionDetail = ResumeDetail | ProjectDetail;

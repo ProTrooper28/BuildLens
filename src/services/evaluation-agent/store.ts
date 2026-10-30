@@ -21,6 +21,7 @@
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
+import type { EvidenceBundle } from "@/services/evidence/types";
 import { readEnv } from "./env";
 import { agentLogger, errorMessage } from "./logger";
 import {
@@ -34,6 +35,7 @@ import {
 export interface EvaluationRunPatch {
   status?: EvaluationRunStatus | undefined;
   result?: StructuredEvaluation | null | undefined;
+  evidenceBundle?: EvidenceBundle | null | undefined;
   error?: string | null | undefined;
   model?: string | null | undefined;
   startedAt?: string | null | undefined;
@@ -79,6 +81,7 @@ export class MemoryEvaluationStore implements EvaluationRunStore {
       status: "pending",
       submission,
       result: null,
+      evidenceBundle: null,
       error: null,
       model: null,
       createdAt: timestamp,
@@ -100,6 +103,7 @@ export class MemoryEvaluationStore implements EvaluationRunStore {
     if (!run) throw new EvaluationStoreError(`Evaluation run ${id} does not exist`);
     if (patch.status !== undefined) run.status = patch.status;
     if (patch.result !== undefined) run.result = patch.result;
+    if (patch.evidenceBundle !== undefined) run.evidenceBundle = patch.evidenceBundle;
     if (patch.error !== undefined) run.error = patch.error;
     if (patch.model !== undefined) run.model = patch.model;
     if (patch.startedAt !== undefined) run.startedAt = patch.startedAt;
@@ -117,6 +121,7 @@ interface AiEvaluationRunRow {
   submission: unknown;
   status: string;
   result: unknown;
+  evidence_bundle?: unknown;
   error: string | null;
   model: string | null;
   started_at: string | null;
@@ -131,6 +136,7 @@ function rowToRun(row: AiEvaluationRunRow): EvaluationRun {
     status: isEvaluationRunStatus(row.status) ? row.status : "failed",
     submission: row.submission as EvaluationSubmission,
     result: (row.result ?? null) as StructuredEvaluation | null,
+    evidenceBundle: (row.evidence_bundle ?? null) as EvidenceBundle | null,
     error: row.error,
     model: row.model,
     createdAt: row.created_at,
@@ -193,17 +199,36 @@ export class SupabaseEvaluationRunStore implements EvaluationRunStore {
     const row: Record<string, unknown> = { updated_at: now() };
     if (patch.status !== undefined) row["status"] = patch.status;
     if (patch.result !== undefined) row["result"] = patch.result;
+    // The evidence bundle is written best-effort: a database that predates the
+    // column must not fail the run, it only loses refresh-safe evidence.
+    if (patch.evidenceBundle !== undefined) row["evidence_bundle"] = patch.evidenceBundle;
     if (patch.error !== undefined) row["error"] = patch.error;
     if (patch.model !== undefined) row["model"] = patch.model;
     if (patch.startedAt !== undefined) row["started_at"] = patch.startedAt;
     if (patch.completedAt !== undefined) row["completed_at"] = patch.completedAt;
 
-    const { data, error } = await this.supabase()
+    let { data, error } = await this.supabase()
       .from("ai_evaluation_runs")
       .update(row)
       .eq("id", id)
       .select()
       .single();
+
+    // A deployment that has not applied 0006 yet has no evidence_bundle
+    // column. The run itself must still succeed, so retry without it.
+    if (error && "evidence_bundle" in row && /evidence_bundle/i.test(error.message)) {
+      const { evidence_bundle: _dropped, ...rest } = row;
+      void _dropped;
+      const retry = await this.supabase()
+        .from("ai_evaluation_runs")
+        .update(rest)
+        .eq("id", id)
+        .select()
+        .single();
+      data = retry.data;
+      error = retry.error;
+    }
+
     if (error || !data) {
       throw new EvaluationStoreError(
         `Could not update the evaluation run: ${error?.message ?? "no row returned"}. ${TABLE_HINT}`,

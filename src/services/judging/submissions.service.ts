@@ -290,6 +290,7 @@ async function projectFromRow(
   let summary: string | null = null;
   let solution: string | null = null;
   let presentationClaims: PresentationClaims | null = null;
+  let presentationPages: NonNullable<ProjectDetail["presentationPages"]> | null = null;
 
   if (viewer.userId) {
     try {
@@ -303,6 +304,7 @@ async function projectFromRow(
           summary = view.executiveSummary ?? view.overview.summary;
           solution = view.architecture.summary;
           presentationClaims = deckClaims(view.documentAnalysis?.claims ?? null);
+          presentationPages = deckPages(view.documentAnalysis?.pages ?? null);
         }
       }
     } catch {
@@ -319,6 +321,7 @@ async function projectFromRow(
       summary = summary ?? view.executiveSummary ?? view.overview.summary;
       solution = solution ?? view.architecture.summary;
       presentationClaims = deckClaims(view.documentAnalysis?.claims ?? null);
+      presentationPages = deckPages(view.documentAnalysis?.pages ?? null);
     }
   }
 
@@ -354,7 +357,21 @@ async function projectFromRow(
       { label: "Report", value: summary ? "Attached" : "None attached" },
     ],
     presentationClaims,
+    presentationPages,
   };
+}
+
+/**
+ * Per-page deck text → the short previews claims are cited against ("PDF page
+ * 7"). Empty when the report predates page text or the deck was image-only.
+ */
+function deckPages(
+  pages: { page: number; text: string | null }[] | null | undefined,
+): NonNullable<ProjectDetail["presentationPages"]> | null {
+  const withText = (pages ?? [])
+    .filter((page) => (page.text ?? "").trim().length > 0)
+    .map((page) => ({ page: page.page, text: (page.text ?? "").trim().slice(0, 2000) }));
+  return withText.length > 0 ? withText.slice(0, 80) : null;
 }
 
 /** Report deck claims → the judge-facing claim shape (empty = no deck claims). */

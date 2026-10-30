@@ -8,6 +8,8 @@ import { Button } from "@/components/ui/button";
 import { SubmissionPreview } from "@/components/evaluation/SubmissionPreview";
 import { ScoringPanel } from "@/components/evaluation/ScoringPanel";
 import { EvidencePanel } from "@/components/evaluation/EvidenceSection";
+import { JudgeSummary } from "@/components/evaluation/JudgeSummary";
+import { buildInspectionReport } from "@/services/inspection";
 import {
   AiVerdictPanel,
   deriveVerdictFromSubmission,
@@ -158,9 +160,22 @@ function SubmissionDetailView({
   // Same motion language as the rest of the app: forward slides in from the right,
   // back from the left, so list → detail and detail → list read as one move.
   const direction = useNavigationDirection();
-  // One evidence run per submission, shared by the evidence section and the
-  // compact summary beside the scoring criteria.
-  const evidence = useEvidenceRun(detail);
+  // One evidence run per submission, shared by the judge summary, the detailed
+  // analysis page and the compact summary beside the scoring criteria.
+  // Projects are inspected automatically; resumes keep the manual run.
+  const evidence = useEvidenceRun(detail, { autoStart: detail.category === "project" });
+
+  // Deterministic judge report — built from the persisted bundle, so it exists
+  // even when the AI stage failed.
+  const inspectionReport = useMemo(() => {
+    if (detail.category !== "project" || !evidence.bundle) return null;
+    return buildInspectionReport({
+      detail,
+      bundle: evidence.bundle,
+      evaluation: evidence.run?.result ?? null,
+      runError: evidence.error,
+    });
+  }, [detail, evidence.bundle, evidence.run, evidence.error]);
 
   const targets = useMemo(() => criterionTargets(criteriaSet), [criteriaSet]);
   const [scores, setScores] = useState<CriterionScore[]>(() => seedScores(targets, myRecord));
@@ -335,15 +350,34 @@ function SubmissionDetailView({
         className="grid items-start gap-6 pb-24 lg:grid-cols-[minmax(0,1fr)_380px] lg:pb-0 xl:grid-cols-[minmax(0,1fr)_420px]"
       >
         <div className="min-w-0 space-y-5">
-          <SubmissionPreview detail={detail} />
-          <EvidencePanel
-            submission={detail}
-            phase={evidence.phase}
-            run={evidence.run}
-            error={evidence.error}
-            starting={evidence.starting}
-            onStart={evidence.start}
-          />
+          {detail.category === "project" ? (
+            <>
+              {/* Verdict first: the judge should understand the submission before
+                  reading the team's own pitch. */}
+              <JudgeSummary
+                submissionId={detail.id}
+                report={inspectionReport}
+                phase={evidence.phase}
+                partial={evidence.partial}
+                error={evidence.error}
+                starting={evidence.starting}
+                onStart={evidence.start}
+              />
+              <SubmissionPreview detail={detail} />
+            </>
+          ) : (
+            <>
+              <SubmissionPreview detail={detail} />
+              <EvidencePanel
+                submission={detail}
+                phase={evidence.phase}
+                run={evidence.run}
+                error={evidence.error}
+                starting={evidence.starting}
+                onStart={evidence.start}
+              />
+            </>
+          )}
         </div>
         <div id="score-panel" className="min-w-0 scroll-mt-24">
           <ScoringPanel
@@ -373,10 +407,10 @@ function SubmissionDetailView({
             evaluators={evaluators}
             judgeId={judge.id}
             evidence={
-              evidence.run?.result?.evidenceBundle
+              evidence.bundle
                 ? {
-                    counts: evidence.run.result.evidenceBundle.counts,
-                    total: evidence.run.result.evidenceBundle.claims.length,
+                    counts: evidence.bundle.counts,
+                    total: evidence.bundle.claims.length,
                   }
                 : null
             }

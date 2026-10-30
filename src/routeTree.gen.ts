@@ -27,6 +27,7 @@ import { Route as ProgressRouteImport } from './routes/progress'
 import { Route as ReportsRouteImport } from './routes/reports'
 import { Route as TermsRouteImport } from './routes/terms'
 import { Route as ApiEvaluationsRouteImport } from './routes/api.evaluations'
+import { Route as EvaluationIndexRouteImport } from './routes/evaluation.index'
 import { Route as EvaluationCompareRouteImport } from './routes/evaluation.compare'
 import { Route as EvaluationCriteriaRouteImport } from './routes/evaluation.criteria'
 import { Route as EvaluationLeaderboardRouteImport } from './routes/evaluation.leaderboard'
@@ -38,8 +39,11 @@ import { Route as ReportIdRouteImport } from './routes/report.$id'
 import { Route as ReviewDeveloperRouteImport } from './routes/review.developer'
 import { Route as ReviewProjectRouteImport } from './routes/review.project'
 import { Route as ApiEvaluationsIdRouteImport } from './routes/api.evaluations.$id'
+import { Route as EvaluationProjectIndexRouteImport } from './routes/evaluation.project.index'
 import { Route as EvaluationProjectIdRouteImport } from './routes/evaluation.project.$id'
+import { Route as EvaluationResumeIndexRouteImport } from './routes/evaluation.resume.index'
 import { Route as EvaluationResumeIdRouteImport } from './routes/evaluation.resume.$id'
+import { Route as EvaluationProjectIdAnalysisRouteImport } from './routes/evaluation.project.$id_.analysis'
 import { Route as HackathonsCodeProjectProjectIdRouteImport } from './routes/hackathons.$code.project.$projectId'
 import { Route as HackathonsCodeResumeResumeIdRouteImport } from './routes/hackathons.$code.resume.$resumeId'
 
@@ -133,6 +137,11 @@ const ApiEvaluationsRoute = ApiEvaluationsRouteImport.update({
   path: '/api/evaluations',
   getParentRoute: () => rootRouteImport,
 } as any)
+const EvaluationIndexRoute = EvaluationIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => EvaluationRoute,
+} as any)
 const EvaluationCompareRoute = EvaluationCompareRouteImport.update({
   id: '/compare',
   path: '/compare',
@@ -188,16 +197,32 @@ const ApiEvaluationsIdRoute = ApiEvaluationsIdRouteImport.update({
   path: '/$id',
   getParentRoute: () => ApiEvaluationsRoute,
 } as any)
+const EvaluationProjectIndexRoute = EvaluationProjectIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => EvaluationProjectRoute,
+} as any)
 const EvaluationProjectIdRoute = EvaluationProjectIdRouteImport.update({
   id: '/$id',
   path: '/$id',
   getParentRoute: () => EvaluationProjectRoute,
+} as any)
+const EvaluationResumeIndexRoute = EvaluationResumeIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => EvaluationResumeRoute,
 } as any)
 const EvaluationResumeIdRoute = EvaluationResumeIdRouteImport.update({
   id: '/$id',
   path: '/$id',
   getParentRoute: () => EvaluationResumeRoute,
 } as any)
+const EvaluationProjectIdAnalysisRoute =
+  EvaluationProjectIdAnalysisRouteImport.update({
+    id: '/$id_/analysis',
+    path: '/$id/analysis',
+    getParentRoute: () => EvaluationProjectRoute,
+  } as any)
 const HackathonsCodeProjectProjectIdRoute =
   HackathonsCodeProjectProjectIdRouteImport.update({
     id: '/project/$projectId',
@@ -239,10 +264,14 @@ export interface FileRoutesByFullPath {
   '/report/$id': typeof ReportIdRoute
   '/review/developer': typeof ReviewDeveloperRoute
   '/review/project': typeof ReviewProjectRoute
+  '/evaluation/': typeof EvaluationIndexRoute
   '/hackathons/': typeof HackathonsIndexRoute
   '/api/evaluations/$id': typeof ApiEvaluationsIdRoute
   '/evaluation/project/$id': typeof EvaluationProjectIdRoute
   '/evaluation/resume/$id': typeof EvaluationResumeIdRoute
+  '/evaluation/project/': typeof EvaluationProjectIndexRoute
+  '/evaluation/resume/': typeof EvaluationResumeIndexRoute
+  '/evaluation/project/$id/analysis': typeof EvaluationProjectIdAnalysisRoute
   '/hackathons/$code/project/$projectId': typeof HackathonsCodeProjectProjectIdRoute
   '/hackathons/$code/resume/$resumeId': typeof HackathonsCodeResumeResumeIdRoute
 }
@@ -252,7 +281,6 @@ export interface FileRoutesByTo {
   '/contact': typeof ContactRoute
   '/dashboard': typeof DashboardRoute
   '/docs': typeof DocsRoute
-  '/evaluation': typeof EvaluationRouteWithChildren
   '/features': typeof FeaturesRoute
   '/how-it-works': typeof HowItWorksRoute
   '/login': typeof LoginRoute
@@ -267,16 +295,18 @@ export interface FileRoutesByTo {
   '/evaluation/compare': typeof EvaluationCompareRoute
   '/evaluation/criteria': typeof EvaluationCriteriaRoute
   '/evaluation/leaderboard': typeof EvaluationLeaderboardRoute
-  '/evaluation/project': typeof EvaluationProjectRouteWithChildren
-  '/evaluation/resume': typeof EvaluationResumeRouteWithChildren
   '/hackathons/$code': typeof HackathonsCodeRouteWithChildren
   '/report/$id': typeof ReportIdRoute
   '/review/developer': typeof ReviewDeveloperRoute
   '/review/project': typeof ReviewProjectRoute
+  '/evaluation': typeof EvaluationIndexRoute
   '/hackathons': typeof HackathonsIndexRoute
   '/api/evaluations/$id': typeof ApiEvaluationsIdRoute
   '/evaluation/project/$id': typeof EvaluationProjectIdRoute
   '/evaluation/resume/$id': typeof EvaluationResumeIdRoute
+  '/evaluation/project': typeof EvaluationProjectIndexRoute
+  '/evaluation/resume': typeof EvaluationResumeIndexRoute
+  '/evaluation/project/$id/analysis': typeof EvaluationProjectIdAnalysisRoute
   '/hackathons/$code/project/$projectId': typeof HackathonsCodeProjectProjectIdRoute
   '/hackathons/$code/resume/$resumeId': typeof HackathonsCodeResumeResumeIdRoute
 }
@@ -309,10 +339,14 @@ export interface FileRoutesById {
   '/report/$id': typeof ReportIdRoute
   '/review/developer': typeof ReviewDeveloperRoute
   '/review/project': typeof ReviewProjectRoute
+  '/evaluation/': typeof EvaluationIndexRoute
   '/hackathons/': typeof HackathonsIndexRoute
   '/api/evaluations/$id': typeof ApiEvaluationsIdRoute
   '/evaluation/project/$id': typeof EvaluationProjectIdRoute
   '/evaluation/resume/$id': typeof EvaluationResumeIdRoute
+  '/evaluation/project/': typeof EvaluationProjectIndexRoute
+  '/evaluation/resume/': typeof EvaluationResumeIndexRoute
+  '/evaluation/project/$id_/analysis': typeof EvaluationProjectIdAnalysisRoute
   '/hackathons/$code/project/$projectId': typeof HackathonsCodeProjectProjectIdRoute
   '/hackathons/$code/resume/$resumeId': typeof HackathonsCodeResumeResumeIdRoute
 }
@@ -346,10 +380,14 @@ export interface FileRouteTypes {
     | '/report/$id'
     | '/review/developer'
     | '/review/project'
+    | '/evaluation/'
     | '/hackathons/'
     | '/api/evaluations/$id'
     | '/evaluation/project/$id'
     | '/evaluation/resume/$id'
+    | '/evaluation/project/'
+    | '/evaluation/resume/'
+    | '/evaluation/project/$id/analysis'
     | '/hackathons/$code/project/$projectId'
     | '/hackathons/$code/resume/$resumeId'
   fileRoutesByTo: FileRoutesByTo
@@ -359,7 +397,6 @@ export interface FileRouteTypes {
     | '/contact'
     | '/dashboard'
     | '/docs'
-    | '/evaluation'
     | '/features'
     | '/how-it-works'
     | '/login'
@@ -374,16 +411,18 @@ export interface FileRouteTypes {
     | '/evaluation/compare'
     | '/evaluation/criteria'
     | '/evaluation/leaderboard'
-    | '/evaluation/project'
-    | '/evaluation/resume'
     | '/hackathons/$code'
     | '/report/$id'
     | '/review/developer'
     | '/review/project'
+    | '/evaluation'
     | '/hackathons'
     | '/api/evaluations/$id'
     | '/evaluation/project/$id'
     | '/evaluation/resume/$id'
+    | '/evaluation/project'
+    | '/evaluation/resume'
+    | '/evaluation/project/$id/analysis'
     | '/hackathons/$code/project/$projectId'
     | '/hackathons/$code/resume/$resumeId'
   id:
@@ -415,10 +454,14 @@ export interface FileRouteTypes {
     | '/report/$id'
     | '/review/developer'
     | '/review/project'
+    | '/evaluation/'
     | '/hackathons/'
     | '/api/evaluations/$id'
     | '/evaluation/project/$id'
     | '/evaluation/resume/$id'
+    | '/evaluation/project/'
+    | '/evaluation/resume/'
+    | '/evaluation/project/$id_/analysis'
     | '/hackathons/$code/project/$projectId'
     | '/hackathons/$code/resume/$resumeId'
   fileRoutesById: FileRoutesById
@@ -575,6 +618,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiEvaluationsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/evaluation/': {
+      id: '/evaluation/'
+      path: '/'
+      fullPath: '/evaluation/'
+      preLoaderRoute: typeof EvaluationIndexRouteImport
+      parentRoute: typeof EvaluationRoute
+    }
     '/evaluation/compare': {
       id: '/evaluation/compare'
       path: '/compare'
@@ -652,6 +702,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiEvaluationsIdRouteImport
       parentRoute: typeof ApiEvaluationsRoute
     }
+    '/evaluation/project/': {
+      id: '/evaluation/project/'
+      path: '/'
+      fullPath: '/evaluation/project/'
+      preLoaderRoute: typeof EvaluationProjectIndexRouteImport
+      parentRoute: typeof EvaluationProjectRoute
+    }
     '/evaluation/project/$id': {
       id: '/evaluation/project/$id'
       path: '/$id'
@@ -659,12 +716,26 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof EvaluationProjectIdRouteImport
       parentRoute: typeof EvaluationProjectRoute
     }
+    '/evaluation/resume/': {
+      id: '/evaluation/resume/'
+      path: '/'
+      fullPath: '/evaluation/resume/'
+      preLoaderRoute: typeof EvaluationResumeIndexRouteImport
+      parentRoute: typeof EvaluationResumeRoute
+    }
     '/evaluation/resume/$id': {
       id: '/evaluation/resume/$id'
       path: '/$id'
       fullPath: '/evaluation/resume/$id'
       preLoaderRoute: typeof EvaluationResumeIdRouteImport
       parentRoute: typeof EvaluationResumeRoute
+    }
+    '/evaluation/project/$id_/analysis': {
+      id: '/evaluation/project/$id_/analysis'
+      path: '/$id/analysis'
+      fullPath: '/evaluation/project/$id/analysis'
+      preLoaderRoute: typeof EvaluationProjectIdAnalysisRouteImport
+      parentRoute: typeof EvaluationProjectRoute
     }
     '/hackathons/$code/project/$projectId': {
       id: '/hackathons/$code/project/$projectId'
@@ -685,10 +756,14 @@ declare module '@tanstack/react-router' {
 
 interface EvaluationProjectRouteChildren {
   EvaluationProjectIdRoute: typeof EvaluationProjectIdRoute
+  EvaluationProjectIndexRoute: typeof EvaluationProjectIndexRoute
+  EvaluationProjectIdAnalysisRoute: typeof EvaluationProjectIdAnalysisRoute
 }
 
 const EvaluationProjectRouteChildren: EvaluationProjectRouteChildren = {
   EvaluationProjectIdRoute: EvaluationProjectIdRoute,
+  EvaluationProjectIndexRoute: EvaluationProjectIndexRoute,
+  EvaluationProjectIdAnalysisRoute: EvaluationProjectIdAnalysisRoute,
 }
 
 const EvaluationProjectRouteWithChildren =
@@ -696,10 +771,12 @@ const EvaluationProjectRouteWithChildren =
 
 interface EvaluationResumeRouteChildren {
   EvaluationResumeIdRoute: typeof EvaluationResumeIdRoute
+  EvaluationResumeIndexRoute: typeof EvaluationResumeIndexRoute
 }
 
 const EvaluationResumeRouteChildren: EvaluationResumeRouteChildren = {
   EvaluationResumeIdRoute: EvaluationResumeIdRoute,
+  EvaluationResumeIndexRoute: EvaluationResumeIndexRoute,
 }
 
 const EvaluationResumeRouteWithChildren =
@@ -711,6 +788,7 @@ interface EvaluationRouteChildren {
   EvaluationLeaderboardRoute: typeof EvaluationLeaderboardRoute
   EvaluationProjectRoute: typeof EvaluationProjectRouteWithChildren
   EvaluationResumeRoute: typeof EvaluationResumeRouteWithChildren
+  EvaluationIndexRoute: typeof EvaluationIndexRoute
 }
 
 const EvaluationRouteChildren: EvaluationRouteChildren = {
@@ -719,6 +797,7 @@ const EvaluationRouteChildren: EvaluationRouteChildren = {
   EvaluationLeaderboardRoute: EvaluationLeaderboardRoute,
   EvaluationProjectRoute: EvaluationProjectRouteWithChildren,
   EvaluationResumeRoute: EvaluationResumeRouteWithChildren,
+  EvaluationIndexRoute: EvaluationIndexRoute,
 }
 
 const EvaluationRouteWithChildren = EvaluationRoute._addFileChildren(

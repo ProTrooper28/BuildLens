@@ -77,8 +77,11 @@ export interface DocumentAnalysisPayload {
   ocr_applied: boolean | null;
   error: string | null;
   warnings: string[];
-  /** Light per-page stats; full page text stays out of the payload. */
-  pages: { page: number; chars: number; source: PageSource }[];
+  /**
+   * Light per-page stats plus a short text preview. The preview is what lets a
+   * claim cite "PDF page 7" without storing the whole document.
+   */
+  pages: { page: number; chars: number; source: PageSource; text: string | null }[];
   claims: DocumentClaims | null;
   summary: string | null;
   extracted_at: string | null;

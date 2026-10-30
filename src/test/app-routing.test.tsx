@@ -38,11 +38,15 @@ describe("App routing", () => {
     const router = createRouter({ routeTree, context: { queryClient: new QueryClient() } });
 
     const cases: { path: string; routeId: string }[] = [
-      { path: "/evaluation", routeId: "/evaluation" },
-      { path: "/evaluation/resume", routeId: "/evaluation/resume" },
-      { path: "/evaluation/project", routeId: "/evaluation/project" },
+      { path: "/evaluation", routeId: "/evaluation/" },
+      { path: "/evaluation/resume", routeId: "/evaluation/resume/" },
+      { path: "/evaluation/project", routeId: "/evaluation/project/" },
       { path: "/evaluation/resume/resume:demo-1", routeId: "/evaluation/resume/$id" },
       { path: "/evaluation/project/project:demo-1", routeId: "/evaluation/project/$id" },
+      {
+        path: "/evaluation/project/project:demo-1/analysis",
+        routeId: "/evaluation/project/$id_/analysis",
+      },
       { path: "/evaluation/leaderboard", routeId: "/evaluation/leaderboard" },
       { path: "/evaluation/compare", routeId: "/evaluation/compare" },
       { path: "/evaluation/criteria", routeId: "/evaluation/criteria" },

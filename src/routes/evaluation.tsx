@@ -1,22 +1,16 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Outlet } from "@tanstack/react-router";
 
-import { EvaluationLanding } from "@/components/evaluation/EvaluationLanding";
-import { RequireRole } from "@/components/auth/RequireRole";
-
+/**
+ * Evaluation section layout.
+ *
+ * `/evaluation` itself is `evaluation.index.tsx`; project/resume lists and their
+ * detail pages render here. Without this `<Outlet />`, TanStack Router matches
+ * the child route but has nowhere to mount it.
+ */
 export const Route = createFileRoute("/evaluation")({
-  head: () => ({
-    meta: [
-      { title: "Judge Evaluation — BuildLens" },
-      {
-        name: "description",
-        content:
-          "Inspect, score and rank developer resumes and submitted projects with a configurable rubric.",
-      },
-    ],
-  }),
-  component: () => (
-    <RequireRole role="manager">
-      <EvaluationLanding />
-    </RequireRole>
-  ),
+  component: EvaluationLayout,
 });
+
+function EvaluationLayout() {
+  return <Outlet />;
+}

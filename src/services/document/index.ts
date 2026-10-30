@@ -105,6 +105,8 @@ export function toDocumentAnalysisPayload(
       page: page.page,
       chars: page.text.trim().length,
       source: page.source,
+      // Preview only — enough to locate a claim, not the whole slide.
+      text: page.text.trim().slice(0, 600) || null,
     })),
     claims,
     summary: claims?.summary ?? null,

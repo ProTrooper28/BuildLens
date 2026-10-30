@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
@@ -10,6 +10,7 @@ import {
   storeRunId,
 } from "@/services/judging/evidence.service";
 import type { EvaluationRun } from "@/services/evaluation-agent/schema";
+import type { EvidenceBundle } from "@/services/evidence/types";
 import type { SubmissionDetail } from "@/types/evaluation";
 
 /**
@@ -19,6 +20,11 @@ import type { SubmissionDetail } from "@/types/evaluation";
  * itself is persisted by the agent's store, and a fresh page load re-reads that
  * run instead of starting (and paying for) another one. Only an explicit
  * "Run again" starts a new run.
+ *
+ * The evidence bundle is persisted before the model call, so a run whose AI
+ * stage failed still has a complete inspection. That run is `partial`, not an
+ * error: the judge gets the full findings and a note that the narrative is
+ * missing.
  */
 
 export type EvidencePhase = "idle" | "starting" | "running" | "ready" | "error";
@@ -26,6 +32,10 @@ export type EvidencePhase = "idle" | "starting" | "running" | "ready" | "error";
 export interface EvidenceRunState {
   runId: string | null;
   run: EvaluationRun | null;
+  /** Persisted evidence bundle — present even when the AI stage failed. */
+  bundle: EvidenceBundle | null;
+  /** True when the bundle exists but the run itself did not complete. */
+  partial: boolean;
   phase: EvidencePhase;
   error: string | null;
   start: () => void;
@@ -33,10 +43,14 @@ export interface EvidenceRunState {
   starting: boolean;
 }
 
-export function useEvidenceRun(detail: SubmissionDetail | null): EvidenceRunState {
+export function useEvidenceRun(
+  detail: SubmissionDetail | null,
+  options: { autoStart?: boolean } = {},
+): EvidenceRunState {
   const queryClient = useQueryClient();
   const submissionId = detail?.id ?? null;
   const [runId, setRunId] = useState<string | null>(null);
+  const autoStarted = useRef<string | null>(null);
 
   // Restore the run this browser already started for the submission.
   useEffect(() => {
@@ -79,8 +93,23 @@ export function useEvidenceRun(detail: SubmissionDetail | null): EvidenceRunStat
     startMutation.mutate();
   }, [startMutation, submissionId]);
 
+  // Automatic inspection: a submission opened for the first time is inspected
+  // without the judge having to ask. A stored run is resumed instead, never
+  // re-started, so opening the same submission twice does not pay twice.
+  useEffect(() => {
+    if (!options.autoStart || !detail || !submissionId) return;
+    if (autoStarted.current === submissionId) return;
+    if (readStoredRunId(submissionId)) return;
+    if (startMutation.isPending) return;
+    autoStarted.current = submissionId;
+    startMutation.mutate();
+    // `startMutation` is stable for the lifetime of this hook instance.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [options.autoStart, detail, submissionId]);
+
   const run = runQuery.data ?? null;
-  const error =
+  const bundle: EvidenceBundle | null = run?.evidenceBundle ?? run?.result?.evidenceBundle ?? null;
+  const failure =
     startMutation.error instanceof Error
       ? startMutation.error.message
       : runQuery.error instanceof Error
@@ -88,10 +117,11 @@ export function useEvidenceRun(detail: SubmissionDetail | null): EvidenceRunStat
         : run?.status === "failed"
           ? (run.error ?? "The evidence run failed.")
           : null;
+  const partial = Boolean(bundle) && Boolean(failure);
 
   let phase: EvidencePhase = "idle";
   if (startMutation.isPending) phase = "starting";
-  else if (error) phase = "error";
+  else if (failure) phase = bundle ? "ready" : "error";
   else if (run?.status === "completed") phase = "ready";
   else if (run && isRunInFlight(run)) phase = "running";
   else if (runQuery.isLoading && runId) phase = "running";
@@ -100,8 +130,10 @@ export function useEvidenceRun(detail: SubmissionDetail | null): EvidenceRunStat
   return {
     runId,
     run,
+    bundle,
+    partial,
     phase,
-    error,
+    error: failure,
     start,
     retry,
     starting: startMutation.isPending,

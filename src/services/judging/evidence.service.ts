@@ -81,13 +81,17 @@ export function submissionForEvidence(detail: SubmissionDetail): EvaluationSubmi
     repoUrl: project.repoUrl,
     websiteUrl: project.demoUrl,
     team: project.team,
-    presentation: claims
-      ? {
-          name: project.media.find((item) => item.kind === "document")?.label ?? "Presentation",
-          text: null,
-          claims,
-        }
-      : null,
+    presentation:
+      claims || (project.presentationPages?.length ?? 0) > 0
+        ? {
+            name: project.media.find((item) => item.kind === "document")?.label ?? "Presentation",
+            text: null,
+            ...(claims ? { claims } : {}),
+            // Short page previews so claims can cite "page 7" when the report
+            // stored per-page text.
+            ...(project.presentationPages?.length ? { pages: project.presentationPages } : {}),
+          }
+        : null,
     notes: null,
   };
 }

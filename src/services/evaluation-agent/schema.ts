@@ -67,6 +67,21 @@ export const EvaluationSubmissionSchema = z.object({
        * the model must treat them as UNVERIFIED claims to check against the
        * repository/website evidence, never as facts.
        */
+      /**
+       * Per-page extracted text (short previews), used to cite where a claim was
+       * found in the deck ("PDF page 7"). Older reports carry no page text, in
+       * which case claims simply have no page reference.
+       */
+      pages: z
+        .array(
+          z.object({
+            page: z.number().int().min(1).max(500),
+            text: z.string().max(2000),
+          }),
+        )
+        .max(80)
+        .optional()
+        .nullable(),
       claims: z
         .object({
           summary: z.string().max(2000).optional().nullable(),
@@ -265,6 +280,12 @@ export interface EvaluationRun {
   submission: EvaluationSubmission;
   /** Final structured evaluation — only when `status === "completed"`. */
   result: StructuredEvaluation | null;
+  /**
+   * Evidence collected for this run. Persisted as soon as the sources have been
+   * read, so the judge can still inspect what was verified when the model stage
+   * fails or no model is configured. Null while collection has not finished.
+   */
+  evidenceBundle?: EvidenceBundle | null;
   /** Failure reason — only when `status === "failed"`. */
   error: string | null;
   model: string | null;

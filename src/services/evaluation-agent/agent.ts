@@ -192,6 +192,16 @@ function buildUserPrompt(
         url: source.url,
         detail: source.detail,
         facts: source.highlights,
+        // Structured checks (with the exact URL/header/file path behind them).
+        // They are observations, so the model should reason from them rather
+        // than repeating a README.
+        observations: (source.observations ?? []).map((entry) => ({
+          area: entry.area,
+          check: entry.label,
+          status: entry.status,
+          result: entry.result,
+          evidence: entry.evidence,
+        })),
       })),
       gaps: bundle.gaps,
       evidenceSources: outcomes.map((outcome) => ({
@@ -250,16 +260,24 @@ export async function executeRun(runId: string): Promise<void> {
     });
     agentLogger.info("evaluation.processing", { runId });
 
-    const model = activeEvaluationModel();
-    if (!model || !model.isAvailable()) {
-      throw new EvaluationModelUnavailableError();
-    }
-
+    // Evidence is collected before the model is required. The inspection is a
+    // deterministic read of public sources, so it must reach the judge even when
+    // no AI provider is configured — that run is partial, not empty.
     const outcomes = await collectEvidence(run.submission);
     const gaps = outcomes.filter((outcome) => outcome.status !== "ingested");
     // Deterministic claim → evidence comparison, computed before the model runs
     // so the prompt contains both sides and the result is auditable.
     const bundle = buildEvidenceBundle(run.submission, outcomes);
+    // Persist the bundle before the model runs: if the model is unavailable or
+    // errors, the judge can still inspect exactly what was verified.
+    try {
+      await store.updateRun(runId, { evidenceBundle: bundle });
+    } catch (error) {
+      agentLogger.warn("evaluation.evidence_persist_failed", {
+        runId,
+        error: errorMessage(error),
+      });
+    }
     agentLogger.info("evaluation.evidence", {
       runId,
       ingested: outcomes.length - gaps.length,
@@ -268,6 +286,11 @@ export async function executeRun(runId: string): Promise<void> {
       supported: bundle.counts.supported,
       couldNotVerify: bundle.counts.could_not_verify,
     });
+
+    const model = activeEvaluationModel();
+    if (!model || !model.isAvailable()) {
+      throw new EvaluationModelUnavailableError();
+    }
 
     const raw = await model.request({
       system: SYSTEM_PROMPT,

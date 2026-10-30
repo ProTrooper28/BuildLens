@@ -80,6 +80,26 @@ function ClaimRow({ check }: { check: ClaimCheck }) {
         <ClaimStatusBadge status={check.status} />
       </div>
       <p className="mt-1 text-xs leading-snug text-muted-foreground">{check.note}</p>
+      {((check.pageRefs?.length ?? 0) > 0 || (check.evidenceRefs?.length ?? 0) > 0) && (
+        <ul className="mt-2 flex flex-wrap gap-1">
+          {(check.pageRefs ?? []).map((page) => (
+            <li
+              key={`page-${page}`}
+              className="rounded border border-border/60 bg-muted/30 px-1.5 py-0.5 font-mono text-[10px] leading-tight text-muted-foreground"
+            >
+              Deck page {page}
+            </li>
+          ))}
+          {(check.evidenceRefs ?? []).map((ref) => (
+            <li
+              key={ref}
+              className="rounded border border-border/60 bg-muted/30 px-1.5 py-0.5 font-mono text-[10px] leading-tight text-muted-foreground"
+            >
+              {ref}
+            </li>
+          ))}
+        </ul>
+      )}
       {check.quotes.length > 0 && (
         <ul className="mt-2 space-y-1 border-l-2 border-primary/20 pl-2.5">
           {check.quotes.map((quote) => (
@@ -230,7 +250,7 @@ export function EvidencePanel({
   starting,
   onStart,
 }: EvidencePanelProps) {
-  const bundle = run?.result?.evidenceBundle ?? null;
+  const bundle = run?.evidenceBundle ?? run?.result?.evidenceBundle ?? null;
   const isProject = submission.category === "project";
 
   return (

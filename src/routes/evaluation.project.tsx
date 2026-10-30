@@ -1,21 +1,11 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Outlet } from "@tanstack/react-router";
 
-import { SubmissionListPage } from "@/components/evaluation/SubmissionListPage";
-import { RequireRole } from "@/components/auth/RequireRole";
-
+/**
+ * Project evaluation layout.
+ *
+ * `/evaluation/project` is `evaluation.project.index.tsx`; detail pages and the
+ * detailed analysis page render through this outlet.
+ */
 export const Route = createFileRoute("/evaluation/project")({
-  head: () => ({
-    meta: [
-      { title: "Project Ranking — BuildLens" },
-      {
-        name: "description",
-        content: "Browse, filter and evaluate submitted projects in the BuildLens judging cohort.",
-      },
-    ],
-  }),
-  component: () => (
-    <RequireRole role="manager">
-      <SubmissionListPage category="project" />
-    </RequireRole>
-  ),
+  component: () => <Outlet />,
 });

@@ -189,7 +189,8 @@ export interface DocumentAnalysisView {
   ocrApplied: boolean | null;
   error: string | null;
   warnings: string[];
-  pages: { page: number; chars: number; source: string }[];
+  /** `text` is a short preview used to cite the page a claim came from. */
+  pages: { page: number; chars: number; source: string; text: string | null }[];
   claims: DocumentClaimsView | null;
   disclaimer: string | null;
   extractedAt: string | null;
@@ -495,6 +496,7 @@ function normalizeDocumentAnalysis(value: unknown): DocumentAnalysisView | null 
       page: asNumber(page["page"]) ?? 0,
       chars: asNumber(page["chars"]) ?? 0,
       source: asString(page["source"]) ?? "none",
+      text: asString(page["text"]),
     })),
     claims: normalizeDocumentClaims(record["claims"]),
     disclaimer: asString(record["disclaimer"]),
