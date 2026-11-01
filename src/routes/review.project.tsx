@@ -16,15 +16,19 @@ import { EASE_OUT } from "@/components/motion/primitives";
 import { SubmitButton, type SubmitButtonState } from "@/components/ui/submit-button";
 import { MovingBorder } from "@/components/ui/moving-border";
 import { useAuth } from "@/hooks/useAuth";
-import { createCandidateProject, createProjectForUser } from "@/services/project.service";
-import { createReportForUser } from "@/services/report.service";
-import { createGuestProject, createGuestReport } from "@/services/guest.service";
 import {
   findHackathonByCode,
   portalCandidateId,
-  submitToHackathon,
   syncSubmissionProgress,
 } from "@/services/hackathon.service";
+import {
+  createProjectSubmission,
+  databaseSubmissionStore,
+  describeSubmissionFailure,
+  guestSubmissionStore,
+  type SubmissionDraft,
+  type SubmissionStore,
+} from "@/services/submission.service";
 import type { Hackathon } from "@/types/hackathon";
 import {
   analyzeDocumentFile,
@@ -389,172 +393,78 @@ function ReviewProject() {
         }
       }
 
-      // Guest submissions never reach Supabase (no session ⇒ no user id); they are
-      // stored in this browser and rendered by the same pages as real rows.
-      if (isGuest || !user) {
-        const project = createGuestProject({
-          name: name.trim(),
-          repo_url: repo.trim() || null,
-          website_url: live.trim() || null,
-          description: notes.trim() || null,
-        });
-        const report = createGuestReport({
-          type: "Project",
-          name: project.name,
-          project_id: project.id,
-          status: "In Progress",
-          report_data: reportData,
-        });
+      // Guests have no database session, so their rows are written to this
+      // browser by the guest store and rendered by the same pages as real ones.
+      const guestSubmission = isGuest || !user;
 
-        const candidateId = portalCandidateId(null, true);
-        // Always recorded: an unassigned project is still a submission, and this
-        // is the row the candidate's status page and the judges' intake read.
-        const hackathonSubmission = await submitToHackathon({
-          hackathonId: target?.id ?? null,
-          candidateId,
-          teamName: teamName.trim() || project.name,
-          teamMembers,
-          description: project.description,
-          repoUrl: project.repo_url,
-          websiteUrl: project.website_url,
-          deckName: deckFile?.name ?? null,
-          projectId: project.id,
-          reportId: report.id,
-        });
-        await syncSubmissionProgress(hackathonSubmission.id, candidateId, {
-          status: "processing",
-        });
+      // Tag the project row by the *workflow* that created it. Candidates and
+      // guests always file a submission; a manager only files when they typed a
+      // code. That keeps managed work out of the judge queue and candidate
+      // submissions out of the Projects listing.
+      const fileSubmission = guestSubmission
+        ? true
+        : role !== "manager" || joinCode.trim().length > 0;
 
-        // The guest report stays in this browser; the pipeline updates it through
-        // the guest adapter and never touches Supabase.
-        startAnalysis({
-          projectId: project.id,
-          reportId: report.id,
-          name: project.name,
-          repoUrl: project.repo_url,
-          websiteUrl: project.website_url,
-          notes: project.description,
-          createdAt: report.created_at,
-          isGuestSubmission: true,
-          document: docAnalysisRef.current,
-          hackathonSubmissionId: hackathonSubmission.id,
-          candidateId,
-        });
+      const draft: SubmissionDraft = {
+        candidateId: portalCandidateId(user?.id ?? null, guestSubmission),
+        hackathon: target,
+        projectName: name.trim(),
+        teamName: teamName.trim() || name.trim(),
+        teamMembers,
+        description: notes.trim() || null,
+        repoUrl: repo.trim() || null,
+        websiteUrl: live.trim() || null,
+        deckName: deckFile?.name ?? null,
+        reportData,
+      };
 
-        window.clearTimeout(stageTimer);
-        finishSubmission(project.id, report.id, project.name, hackathonSubmission.id);
-        return;
-      }
+      const store: SubmissionStore =
+        !user || isGuest
+          ? guestSubmissionStore()
+          : databaseSubmissionStore(user.id, {
+              source: fileSubmission ? "candidate_submission" : "project_manager",
+            });
 
-      // The project row backs the hackathon submission, so it is tagged as a
-      // candidate submission — the Projects listing never shows it, while the
-      // status page, progress and the judge's detail view still read it by id.
-      // Tag the project row by the workflow that created it: the project page
-      // must never list it for candidates (source = candidate_submission) but
-      // must list it for the project manager. Signing in is required to list it
-      // as managed work; candidates always file a submission here.
-      // A manager who filed into a hackathon by typing a code is acting as a
-      // candidate for that submission (the project is tagged candidate_submission
-      // and appears in the hackathon, never the Projects list). A manager who did
-      // not type a code creates managed work (project_manager) with no submission.
-      // Candidates always file; guests always file; managers only file when they
-      // typed a code.
-      const submitForHackathon =
-        !isGuest && role === "manager"
-          ? joinCode.trim().length > 0
-          : true;
+      // One call owns the write order (project → report → submission → progress),
+      // reuses the submission this candidate already filed on a retry, and removes
+      // anything it created when a later step fails.
+      const outcome = await createProjectSubmission(store, draft, { fileSubmission });
 
-      const project = submitForHackathon
-        ? await createCandidateProject(user.id, {
-            name: name.trim(),
-            repo_url: repo.trim() || null,
-            website_url: live.trim() || null,
-            description: notes.trim() || null,
-            status: "draft",
-          })
-        : await createProjectForUser(user.id, {
-            name: name.trim(),
-            repo_url: repo.trim() || null,
-            website_url: live.trim() || null,
-            description: notes.trim() || null,
-            status: "draft",
-          });
-
-      // The investigation produces a report for this project behind a real id
-      // so /progress and /report/$id can carry it.
-      const report = await createReportForUser(user.id, {
-        type: "Project",
-        name: project.name,
-        project_id: project.id,
-        status: "In Progress",
-        report_data: reportData,
-      });
-
-      // For project-manager work the report is the atomic unit: there is no
-      // hackathon submission row, the project never leaves the Projects list, and
-      // the manager lands straight on /progress. Only candidates (or a manager who
-      // deliberately filed into a hackathon) create the judge portal's record.
-      // The analysis pipeline still runs for every report so the progress page has
-      // stages to show regardless of whether a submission was filed. For managed
-      // work there is no submission, so the id args are left out (the pipeline and
-      // the detail views do not require them).
-      if (submitForHackathon) {
-        const candidateId = portalCandidateId(user.id, false);
-        const hackathonSubmission = await submitToHackathon({
-          hackathonId: target?.id ?? null,
-          candidateId,
-          teamName: teamName.trim() || project.name,
-          teamMembers,
-          description: project.description,
-          repoUrl: project.repo_url,
-          websiteUrl: project.website_url,
-          deckName: deckFile?.name ?? null,
-          projectId: project.id,
-          reportId: report.id,
-        });
-        await syncSubmissionProgress(hackathonSubmission.id, candidateId, {
-          status: "processing",
-        });
-
-        startAnalysis({
-          projectId: project.id,
-          reportId: report.id,
-          name: project.name,
-          repoUrl: project.repo_url,
-          websiteUrl: project.website_url,
-          notes: project.description,
-          createdAt: report.created_at,
-          isGuestSubmission: false,
-          document: docAnalysisRef.current,
-          hackathonSubmissionId: hackathonSubmission.id,
-          candidateId,
-        });
-
-        window.clearTimeout(stageTimer);
-        finishSubmission(project.id, report.id, project.name, hackathonSubmission.id);
-        return;
-      }
-
+      // The analysis runs on the report that exists now; it is never awaited, so
+      // a slow repository cannot fail a stored submission.
       startAnalysis({
-        projectId: project.id,
-        reportId: report.id,
-        name: project.name,
-        repoUrl: project.repo_url,
-        websiteUrl: project.website_url,
-        notes: project.description,
-        createdAt: report.created_at,
-        isGuestSubmission: false,
+        projectId: outcome.projectId,
+        reportId: outcome.reportId,
+        name: outcome.projectName,
+        repoUrl: draft.repoUrl,
+        websiteUrl: draft.websiteUrl,
+        notes: draft.description,
+        createdAt: outcome.reportCreatedAt,
+        isGuestSubmission: guestSubmission,
         document: docAnalysisRef.current,
+        hackathonSubmissionId: outcome.submissionId,
+        candidateId: outcome.submissionId ? draft.candidateId : null,
       });
 
       window.clearTimeout(stageTimer);
-      finishSubmission(project.id, report.id, project.name, null);
-      return;
+      finishSubmission(
+        outcome.projectId,
+        outcome.reportId,
+        outcome.projectName,
+        outcome.submissionId,
+      );
     } catch (error) {
       window.clearTimeout(stageTimer);
-      console.error(error);
+      // The service logs the real failure (step, SQLSTATE/HTTP code, message,
+      // detail, hint, original error). The candidate sees what they can act on —
+      // plus the raw detail while developing, so it is never hidden behind
+      // "Submission failed".
+      const failure = describeSubmissionFailure(error);
       setSubmitState("error");
-      notify.error("Submission failed", "We couldn't create this project review.");
+      notify.error(
+        "Submission failed",
+        failure.diagnostic ? `${failure.message} ${failure.diagnostic}` : failure.message,
+      );
       // Return to the idle label so the action stays available for a retry.
       errorResetTimer.current = window.setTimeout(() => {
         setSubmitState("idle");

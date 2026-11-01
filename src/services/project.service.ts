@@ -46,7 +46,10 @@ export async function getProject(id: string): Promise<Project | null> {
 export async function createProject(input: ProjectInsert): Promise<Project> {
   const supabase = getSupabase();
   const { data, error } = await supabase.from("projects").insert(input).select("*").single();
-  if (error) throw new Error(toAuthMessage(error));
+  // The original PostgREST error is kept as `cause`: the readable message is for
+  // the user, while the SQLSTATE code (missing column, policy, constraint) is
+  // what makes a failed insert diagnosable in the console log.
+  if (error) throw new Error(toAuthMessage(error), { cause: error });
   return data;
 }
 
@@ -115,5 +118,5 @@ export async function updateProject(id: string, patch: ProjectUpdate): Promise<P
 export async function deleteProject(id: string): Promise<void> {
   const supabase = getSupabase();
   const { error } = await supabase.from("projects").delete().eq("id", id);
-  if (error) throw new Error(toAuthMessage(error));
+  if (error) throw new Error(toAuthMessage(error), { cause: error });
 }

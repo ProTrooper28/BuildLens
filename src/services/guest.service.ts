@@ -203,3 +203,16 @@ export function deleteGuestReport(id: string): void {
   store.reports = store.reports.filter((r) => r.id !== id);
   writeStore(store);
 }
+
+/**
+ * Remove a guest project from local storage.
+ *
+ * Used to undo a half-created guest submission: when the report or the portal
+ * record cannot be written, the project row is removed again so a retry does not
+ * accumulate orphan projects.
+ */
+export function deleteGuestProject(id: string): void {
+  const store = readStore();
+  store.projects = store.projects.filter((p) => p.id !== id);
+  writeStore(store);
+}

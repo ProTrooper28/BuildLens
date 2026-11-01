@@ -102,7 +102,7 @@ create table if not exists public.projects (
   status       public.project_status not null default 'draft',
   created_at   timestamptz not null default now(),
   updated_at   timestamptz not null default now()
-) enable row level security;
+);
 
 -- ---------------------------------------------------------------------------
 -- Reports table (only if missing, with RLS enabled inline)
@@ -118,7 +118,7 @@ create table if not exists public.reports (
   report_data  jsonb,
   created_at   timestamptz not null default now(),
   updated_at   timestamptz not null default now()
-) enable row level security;
+);
 
 -- ---------------------------------------------------------------------------
 -- Indexes (only if missing — schema-qualified so IF NOT EXISTS is safe)
@@ -277,54 +277,64 @@ alter table public.projects enable row level security;
 alter table public.reports enable row level security;
 
 -- Profiles: readable by everyone, writable only by the owner.
-create policy if not exists "Profiles are viewable by everyone"
-  on public.profiles for select
-  using (true);
+--
+-- Idempotent by checking pg_policies: `create policy if not exists` is not valid
+-- PostgreSQL (42601), and a migration that aborts here leaves the tables with RLS
+-- enabled and *no* policies — which denies every insert, including the candidate
+-- submission flow.
+create or replace function public.create_policy_if_missing(
+  p_schema text,
+  p_table text,
+  p_name text,
+  p_definition text
+)
+returns void
+language plpgsql
+as $fn$
+begin
+  if not exists (
+    select 1 from pg_policies
+    where schemaname = p_schema and tablename = p_table and policyname = p_name
+  ) then
+    execute p_definition;
+  end if;
+end;
+$fn$;
 
-create policy if not exists "Users can insert their own profile"
-  on public.profiles for insert
-  with check (auth.uid() = id);
+select public.create_policy_if_missing('public', 'profiles', 'Profiles are viewable by everyone',
+  $p$create policy "Profiles are viewable by everyone" on public.profiles for select using (true)$p$);
 
-create policy if not exists "Users can update their own profile"
-  on public.profiles for update
-  using (auth.uid() = id)
-  with check (auth.uid() = id);
+select public.create_policy_if_missing('public', 'profiles', 'Users can insert their own profile',
+  $p$create policy "Users can insert their own profile" on public.profiles for insert with check (auth.uid() = id)$p$);
+
+select public.create_policy_if_missing('public', 'profiles', 'Users can update their own profile',
+  $p$create policy "Users can update their own profile" on public.profiles for update using (auth.uid() = id) with check (auth.uid() = id)$p$);
 
 -- Projects: owner-only.
-create policy if not exists "Users can view their own projects"
-  on public.projects for select
-  using (auth.uid() = user_id);
+select public.create_policy_if_missing('public', 'projects', 'Users can view their own projects',
+  $p$create policy "Users can view their own projects" on public.projects for select using (auth.uid() = user_id)$p$);
 
-create policy if not exists "Users can create their own projects"
-  on public.projects for insert
-  with check (auth.uid() = user_id);
+select public.create_policy_if_missing('public', 'projects', 'Users can create their own projects',
+  $p$create policy "Users can create their own projects" on public.projects for insert with check (auth.uid() = user_id)$p$);
 
-create policy if not exists "Users can update their own projects"
-  on public.projects for update
-  using (auth.uid() = user_id)
-  with check (auth.uid() = user_id);
+select public.create_policy_if_missing('public', 'projects', 'Users can update their own projects',
+  $p$create policy "Users can update their own projects" on public.projects for update using (auth.uid() = user_id) with check (auth.uid() = user_id)$p$);
 
-create policy if not exists "Users can delete their own projects"
-  on public.projects for delete
-  using (auth.uid() = user_id);
+select public.create_policy_if_missing('public', 'projects', 'Users can delete their own projects',
+  $p$create policy "Users can delete their own projects" on public.projects for delete using (auth.uid() = user_id)$p$);
 
 -- Reports: owner-only.
-create policy if not exists "Users can view their own reports"
-  on public.reports for select
-  using (auth.uid() = user_id);
+select public.create_policy_if_missing('public', 'reports', 'Users can view their own reports',
+  $p$create policy "Users can view their own reports" on public.reports for select using (auth.uid() = user_id)$p$);
 
-create policy if not exists "Users can create their own reports"
-  on public.reports for insert
-  with check (auth.uid() = user_id);
+select public.create_policy_if_missing('public', 'reports', 'Users can create their own reports',
+  $p$create policy "Users can create their own reports" on public.reports for insert with check (auth.uid() = user_id)$p$);
 
-create policy if not exists "Users can update their own reports"
-  on public.reports for update
-  using (auth.uid() = user_id)
-  with check (auth.uid() = user_id);
+select public.create_policy_if_missing('public', 'reports', 'Users can update their own reports',
+  $p$create policy "Users can update their own reports" on public.reports for update using (auth.uid() = user_id) with check (auth.uid() = user_id)$p$);
 
-create policy if not exists "Users can delete their own reports"
-  on public.reports for delete
-  using (auth.uid() = user_id);
+select public.create_policy_if_missing('public', 'reports', 'Users can delete their own reports',
+  $p$create policy "Users can delete their own reports" on public.reports for delete using (auth.uid() = user_id)$p$);
 
 -- ---------------------------------------------------------------------------
 -- Storage buckets (only if missing)
@@ -348,39 +358,23 @@ where not exists (select 1 from storage.buckets where id = 'demo-videos');
 -- ---------------------------------------------------------------------------
 -- Storage bucket policies (only if missing)
 -- ---------------------------------------------------------------------------
-create policy if not exists "Avatar images are publicly accessible"
-  on storage.objects for select
-  using (bucket_id = 'avatars');
+select public.create_policy_if_missing('storage', 'objects', 'Avatar images are publicly accessible',
+  $p$create policy "Avatar images are publicly accessible" on storage.objects for select using (bucket_id = 'avatars')$p$);
 
-create policy if not exists "Users can upload their own avatar"
-  on storage.objects for insert
-  to authenticated
-  with check (bucket_id = 'avatars' and owner = auth.uid());
+select public.create_policy_if_missing('storage', 'objects', 'Users can upload their own avatar',
+  $p$create policy "Users can upload their own avatar" on storage.objects for insert to authenticated with check (bucket_id = 'avatars' and owner = auth.uid())$p$);
 
-create policy if not exists "Users can update their own avatar"
-  on storage.objects for update
-  to authenticated
-  using (bucket_id = 'avatars' and owner = auth.uid());
+select public.create_policy_if_missing('storage', 'objects', 'Users can update their own avatar',
+  $p$create policy "Users can update their own avatar" on storage.objects for update to authenticated using (bucket_id = 'avatars' and owner = auth.uid())$p$);
 
-create policy if not exists "Users can delete their own avatar"
-  on storage.objects for delete
-  to authenticated
-  using (bucket_id = 'avatars' and owner = auth.uid());
+select public.create_policy_if_missing('storage', 'objects', 'Users can delete their own avatar',
+  $p$create policy "Users can delete their own avatar" on storage.objects for delete to authenticated using (bucket_id = 'avatars' and owner = auth.uid())$p$);
 
-create policy if not exists "Users can manage their own documents"
-  on storage.objects for all
-  to authenticated
-  using (bucket_id = 'documents' and owner = auth.uid())
-  with check (bucket_id = 'documents' and owner = auth.uid());
+select public.create_policy_if_missing('storage', 'objects', 'Users can manage their own documents',
+  $p$create policy "Users can manage their own documents" on storage.objects for all to authenticated using (bucket_id = 'documents' and owner = auth.uid()) with check (bucket_id = 'documents' and owner = auth.uid())$p$);
 
-create policy if not exists "Users can manage their own project files"
-  on storage.objects for all
-  to authenticated
-  using (bucket_id = 'project-files' and owner = auth.uid())
-  with check (bucket_id = 'project-files' and owner = auth.uid());
+select public.create_policy_if_missing('storage', 'objects', 'Users can manage their own project files',
+  $p$create policy "Users can manage their own project files" on storage.objects for all to authenticated using (bucket_id = 'project-files' and owner = auth.uid()) with check (bucket_id = 'project-files' and owner = auth.uid())$p$);
 
-create policy if not exists "Users can manage their own demo videos"
-  on storage.objects for all
-  to authenticated
-  using (bucket_id = 'demo-videos' and owner = auth.uid())
-  with check (bucket_id = 'demo-videos' and owner = auth.uid());
+select public.create_policy_if_missing('storage', 'objects', 'Users can manage their own demo videos',
+  $p$create policy "Users can manage their own demo videos" on storage.objects for all to authenticated using (bucket_id = 'demo-videos' and owner = auth.uid()) with check (bucket_id = 'demo-videos' and owner = auth.uid())$p$);

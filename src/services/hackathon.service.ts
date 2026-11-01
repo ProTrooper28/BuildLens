@@ -57,9 +57,14 @@ export const LOCAL_PORTAL_CANDIDATE_ID = "local-candidate";
  *
  * A signed-in user is their `auth.users.id`; a guest is this browser's local
  * candidate, which is the same identity the local journal already uses.
+ *
+ * Guest mode wins over a session: a guest's project and report rows live in this
+ * browser, so their submission has to be keyed by the local candidate id too.
+ * Deriving an `auth.users.id` for one side of that pair would create a submission
+ * pointing at project/report ids the database has never seen.
  */
 export function portalCandidateId(userId: string | null, isGuest: boolean): string {
-  return userId ?? (isGuest ? LOCAL_PORTAL_CANDIDATE_ID : "");
+  return isGuest ? LOCAL_PORTAL_CANDIDATE_ID : (userId ?? "");
 }
 
 /** The judge identity for the current viewer: their user id, or the local judge. */
@@ -685,16 +690,37 @@ export async function submitToHackathon(input: SubmitProjectInput): Promise<Hack
     canUseRemotePortal(input.candidateId),
     async () => {
       const supabase = getSupabase();
-      // One row per candidate per hackathon; an unassigned project has no
-      // hackathon to conflict on, so it is inserted like any other record.
-      const { data, error } = hackathonId
+
+      // Resume the row this candidate already has for this target instead of
+      // leaning on ON CONFLICT. Two reasons:
+      //   * an unassigned submission is covered by a *partial* unique index, and
+      //     an upsert cannot use a partial index as its conflict target, so a
+      //     retry used to fail with 23505 instead of updating the row;
+      //   * an upsert rewrites `status`, and a candidate rewinding their own
+      //     submission to 'submitted' is exactly what the lifecycle guard and the
+      //     forward-only rule must refuse — the content is what a resubmit edits.
+      const existingQuery = supabase
+        .from("hackathon_submissions")
+        .select("id")
+        .eq("candidate_id", input.candidateId)
+        .limit(1);
+      const { data: existing, error: existingError } = hackathonId
+        ? await existingQuery.eq("hackathon_id", hackathonId).maybeSingle()
+        : await existingQuery.is("hackathon_id", null).maybeSingle();
+      if (existingError) throw new Error(existingError.message, { cause: existingError });
+
+      // `status` stays with the lifecycle: a resubmit edits the project, it does
+      // not restart the judges' queue.
+      const { status: _status, ...content } = payload;
+      const { data, error } = existing
         ? await supabase
             .from("hackathon_submissions")
-            .upsert(payload, { onConflict: "hackathon_id,candidate_id" })
+            .update(content)
+            .eq("id", existing.id)
             .select("*")
             .single()
         : await supabase.from("hackathon_submissions").insert(payload).select("*").single();
-      if (error) throw new Error(error.message);
+      if (error) throw new Error(error.message, { cause: error });
       if (!data) throw new Error("The submission was not saved.");
       return toSubmission(data);
     },
@@ -1178,7 +1204,9 @@ export async function syncSubmissionProgress(
         .eq("candidate_id", candidateId)
         .select("*")
         .maybeSingle();
-      if (error) throw new Error(error.message);
+      // The raw error (SQLSTATE, detail, hint) is kept for the caller's log: a
+      // rejected progress write is a database-policy problem, not a user mistake.
+      if (error) throw new Error(error.message, { cause: error });
       return data ? toSubmission(data) : null;
     },
     () => {
