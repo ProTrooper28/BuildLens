@@ -18,7 +18,12 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { useAuth } from "@/hooks/useAuth";
 import { portalKeys, useJudgeHackathons } from "@/hooks/useHackathonPortal";
-import { createHackathon, portalJudgeId, portalStorageNotice } from "@/services/hackathon.service";
+import {
+  createHackathon,
+  findHackathonByCode,
+  portalJudgeId,
+  portalStorageNotice,
+} from "@/services/hackathon.service";
 import { notify } from "@/lib/toast-messages";
 
 /**
@@ -49,6 +54,7 @@ export function RealHackathonsPanel() {
   const [startsAt, setStartsAt] = useState("");
   const [endsAt, setEndsAt] = useState("");
   const [saving, setSaving] = useState(false);
+  const [creatingDemo, setCreatingDemo] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const rows = hackathons.data ?? [];
@@ -94,6 +100,43 @@ export function RealHackathonsPanel() {
     }
   };
 
+  /**
+   * One-click demo event.
+   *
+   * The walkthrough needs a known code (`DEMO26`) without typing anything into a
+   * form. Idempotent: a second click reuses the event that already exists instead
+   * of failing on the unique code.
+   */
+  const createDemo = async () => {
+    setCreatingDemo(true);
+    try {
+      const existing = await findHackathonByCode("DEMO26", viewerId);
+      if (!existing) {
+        await createHackathon(
+          { id: viewerId, name: profile?.full_name ?? null },
+          {
+            name: "Demo Hackathon 2026",
+            code: "DEMO26",
+            description: "Prototype event for the candidate → judge walkthrough.",
+            status: "open",
+          },
+        );
+      }
+      await queryClient.invalidateQueries({ queryKey: portalKeys.judgeHackathons(viewerId) });
+      notify.success(
+        existing ? "Demo event is already open" : "Demo hackathon created",
+        "Candidates join with DEMO26.",
+      );
+    } catch (cause) {
+      notify.error(
+        "Couldn't create the demo event",
+        cause instanceof Error ? cause.message : "Try again.",
+      );
+    } finally {
+      setCreatingDemo(false);
+    }
+  };
+
   return (
     <section aria-label="Your hackathons" className="mb-12">
       <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
@@ -111,11 +154,21 @@ export function RealHackathonsPanel() {
             if (!next) setError(null);
           }}
         >
-          <DialogTrigger asChild>
-            <Button variant="hero" size="sm">
-              <Plus className="h-4 w-4" /> Create hackathon
+          <div className="flex flex-wrap gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void createDemo()}
+              disabled={creatingDemo}
+            >
+              <Ticket className="h-4 w-4" /> {creatingDemo ? "Preparing…" : "Demo event (DEMO26)"}
             </Button>
-          </DialogTrigger>
+            <DialogTrigger asChild>
+              <Button variant="hero" size="sm">
+                <Plus className="h-4 w-4" /> Create hackathon
+              </Button>
+            </DialogTrigger>
+          </div>
           <DialogContent className="sm:max-w-md">
             <DialogHeader>
               <DialogTitle>Create a hackathon</DialogTitle>
@@ -240,7 +293,11 @@ export function RealHackathonsPanel() {
                   {hackathon.status}
                 </Badge>
                 <Button asChild variant="outline" size="sm">
-                  <Link to="/evaluation/project">
+                  <Link
+                    to="/hackathons/$code"
+                    params={{ code: hackathon.code }}
+                    search={{ view: "projects" }}
+                  >
                     <Gavel className="h-3.5 w-3.5" /> Judge
                     <ArrowRight className="h-3.5 w-3.5" />
                   </Link>

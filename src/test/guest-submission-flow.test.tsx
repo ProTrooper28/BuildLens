@@ -9,6 +9,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { routeTree } from "@/routeTree.gen";
+import { createHackathon, resetPortalStorageState } from "@/services/hackathon.service";
 
 // Guest mode must work with no Supabase session at all: if anything in this flow
 // constructs the client, the test fails loudly.
@@ -57,10 +58,16 @@ async function renderRoute(path: string): Promise<AnyRouter> {
 }
 
 describe("guest project submission flow", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     getSupabase.mockClear();
     window.localStorage.clear();
     window.localStorage.setItem(GUEST_KEY, "true");
+    resetPortalStorageState();
+    // A submission only exists inside a hackathon, so the flow starts with one.
+    await createHackathon(
+      { id: "local-judge", name: "Organizer" },
+      { name: "Demo Hackathon 2026", code: "DEMO26" },
+    );
   });
 
   it("lets a guest fill in, upload and submit a project without signing in", async () => {
@@ -70,8 +77,15 @@ describe("guest project submission flow", () => {
     await screen.findByText(/Submitting without an account/i);
     expect(screen.queryByText(/Sign in to submit a project review/i)).toBeNull();
 
+    const codeInput = screen.getByLabelText(/Hackathon code/i);
+    fireEvent.change(codeInput, { target: { value: "DEMO26" } });
+    fireEvent.blur(codeInput);
+    await screen.findByText(/Submitting to Demo Hackathon 2026/i, undefined, { timeout: 4000 });
     fireEvent.change(screen.getByLabelText(/Project Name/i), {
       target: { value: "Atlas — Climate Risk Dashboard" },
+    });
+    fireEvent.change(screen.getByLabelText(/Team name/i), {
+      target: { value: "Team Atlas" },
     });
     fireEvent.change(screen.getByLabelText(/GitHub Repository URL/i), {
       target: { value: "https://github.com/acme/atlas" },
@@ -115,12 +129,16 @@ describe("guest project submission flow", () => {
       { timeout: 4000 },
     );
 
-    // …and the flow hands over to the progress page with those ids.
-    await waitFor(() => expect(router.state.location.pathname).toBe("/progress"));
-    const search = router.state.location.search as Record<string, string | undefined>;
-    const store = JSON.parse(window.localStorage.getItem(STORE_KEY) as string);
-    expect(search["projectId"]).toBe(store.projects[0].id);
-    expect(search["reportId"]).toBe(store.reports[0].id);
+    // …and the flow hands over to the candidate's own brief status page.
+    await waitFor(
+      () => expect(router.state.location.pathname.startsWith("/submission/")).toBe(true),
+      { timeout: 4000 },
+    );
+    // The candidate lands on the brief confirmation, not the judge-facing report.
+    expect(router.state.location.pathname.startsWith("/submission/")).toBe(true);
+    expect((await screen.findAllByText(/SUBMISSION RECEIVED/i)).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Demo Hackathon 2026/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Team Atlas/).length).toBeGreaterThan(0);
 
     expect(getSupabase).not.toHaveBeenCalled();
   }, 15000);

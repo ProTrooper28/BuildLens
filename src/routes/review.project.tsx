@@ -88,7 +88,9 @@ function ReviewProject() {
   const [name, setName] = useState("");
   // Submitted to the hackathon as `team_members`; optional for solo entries.
   const [members, setMembers] = useState("");
-  // Optional: a submission without a code stays in the workspace only.
+  // The team's own name; falls back to the project name when left empty.
+  const [teamName, setTeamName] = useState("");
+  // Required: the submission is filed under this hackathon for the judges.
   const [joinCode, setJoinCode] = useState("");
   const [codeTouched, setCodeTouched] = useState(false);
   const [joining, setJoining] = useState(false);
@@ -123,13 +125,18 @@ function ReviewProject() {
   const videoReady = videoStatus === "success";
   void videoReady; // optional upload; tracked for future use
 
+  // A submission only exists inside a hackathon: without a resolved code there is
+  // no judge portal to receive it, so the code is required like the deck.
+  const hackathonReady = hackathon !== null;
+
   // Guests may submit without an account; signed-in users need a session.
   const canSubmit = useMemo(
-    () => nameValid && repoValid && liveValid && deckReady && (isGuest || !!user),
-    [nameValid, repoValid, liveValid, deckReady, isGuest, user],
+    () => nameValid && repoValid && liveValid && deckReady && hackathonReady && (isGuest || !!user),
+    [nameValid, repoValid, liveValid, deckReady, hackathonReady, isGuest, user],
   );
 
   const needs = [
+    { key: "code", met: hackathonReady, text: "Valid hackathon code" },
     { key: "name", met: nameValid, text: "Project name (min 2 characters)" },
     { key: "url", met: repoValid && liveValid, text: "Repository and website URLs valid" },
     { key: "deck", met: deckReady, text: "Presentation uploaded" },
@@ -149,8 +156,8 @@ function ReviewProject() {
   /**
    * Resolve a typed code to the hackathon candidates submit to.
    *
-   * A code is optional, but a code that was typed has to resolve: silently
-   * dropping it would file the project outside the event the team meant to enter.
+   * The code has to resolve: silently dropping it would file the project outside
+   * the event the team meant to enter, and the judges would never see it.
    */
   const resolveCode = async (raw: string): Promise<Hackathon | null> => {
     const code = raw.trim();
@@ -311,11 +318,22 @@ function ReviewProject() {
    * The analysis itself runs there, so this button never claims the evaluation
    * has finished when only the submission has.
    */
-  const finishSubmission = (projectId: string, reportId: string, projectName: string) => {
+  const finishSubmission = (
+    projectId: string,
+    reportId: string,
+    projectName: string,
+    hackathonSubmissionId: string | null,
+  ) => {
     setSubmitState("success");
     notify.success("Project submitted", `${projectName} is queued for investigation.`);
     window.setTimeout(() => {
-      navigate({ to: "/progress", search: { projectId, reportId } });
+      // The candidate sees a short confirmation — the judge-side analysis stays in
+      // the portal. Without a submission row there is no portal record to open.
+      if (hackathonSubmissionId) {
+        navigate({ to: "/submission/$id", params: { id: hackathonSubmissionId } });
+      } else {
+        navigate({ to: "/progress", search: { projectId, reportId } });
+      }
     }, 400);
   };
 
@@ -393,7 +411,7 @@ function ReviewProject() {
           ? await submitToHackathon({
               hackathonId: target.id,
               candidateId,
-              teamName: project.name,
+              teamName: teamName.trim() || project.name,
               teamMembers,
               description: project.description,
               repoUrl: project.repo_url,
@@ -426,7 +444,7 @@ function ReviewProject() {
         });
 
         window.clearTimeout(stageTimer);
-        finishSubmission(project.id, report.id, project.name);
+        finishSubmission(project.id, report.id, project.name, hackathonSubmission?.id ?? null);
         return;
       }
 
@@ -455,7 +473,7 @@ function ReviewProject() {
         ? await submitToHackathon({
             hackathonId: target.id,
             candidateId,
-            teamName: project.name,
+            teamName: teamName.trim() || project.name,
             teamMembers,
             description: project.description,
             repoUrl: project.repo_url,
@@ -484,7 +502,7 @@ function ReviewProject() {
       });
 
       window.clearTimeout(stageTimer);
-      finishSubmission(project.id, report.id, project.name);
+      finishSubmission(project.id, report.id, project.name, hackathonSubmission?.id ?? null);
     } catch (error) {
       window.clearTimeout(stageTimer);
       console.error(error);
@@ -561,7 +579,10 @@ function ReviewProject() {
               the organizers' judge portal. */}
           <div className="space-y-2">
             <Label htmlFor="hackathonCode">
-              Hackathon code <span className="font-normal text-muted-foreground">(optional)</span>
+              Hackathon code{" "}
+              <span className="text-destructive" aria-hidden>
+                *
+              </span>
             </Label>
             <div className="relative">
               <Ticket
@@ -607,8 +628,8 @@ function ReviewProject() {
               </p>
             ) : (
               <p id="hackathonCode-help" className="text-xs text-muted-foreground">
-                Enter the code from your organizers so the project appears in their judge portal.
-                Leave it empty to keep the project in your workspace only.
+                Enter the code from your organizers. The project appears in their judge portal as
+                soon as you submit — there is nothing to send by email.
               </p>
             )}
           </div>
@@ -636,7 +657,24 @@ function ReviewProject() {
             )}
           </div>
 
-          {/* Team */}
+          {/* Team name */}
+          <div className="space-y-2">
+            <Label htmlFor="pteamname">
+              Team name <span className="font-normal text-muted-foreground">(optional)</span>
+            </Label>
+            <Input
+              id="pteamname"
+              value={teamName}
+              placeholder="Team Alpha"
+              onChange={(event) => setTeamName(event.target.value)}
+              aria-describedby="pteamname-help"
+            />
+            <p id="pteamname-help" className="text-xs text-muted-foreground">
+              Shown to the judges next to your project. Defaults to the project name.
+            </p>
+          </div>
+
+          {/* Team members */}
           <div className="space-y-2">
             <Label htmlFor="pteam">
               Team members <span className="font-normal text-muted-foreground">(optional)</span>

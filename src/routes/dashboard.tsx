@@ -337,11 +337,16 @@ function Dashboard() {
           </div>
           <div className="grid gap-5 md:grid-cols-2">
             {portalSubmissions.map(({ submission, hackathon }) => (
-              <SubmissionLifecycleCard
-                key={submission.id}
-                hackathon={hackathon}
-                submission={submission}
-              />
+              <div key={submission.id} className="flex flex-col gap-2">
+                <SubmissionLifecycleCard hackathon={hackathon} submission={submission} />
+                <Link
+                  to="/submission/$id"
+                  params={{ id: submission.id }}
+                  className="inline-flex items-center gap-1 self-start text-xs text-primary hover:underline"
+                >
+                  Open submission status <ArrowRight className="h-3.5 w-3.5" />
+                </Link>
+              </div>
             ))}
           </div>
         </section>
