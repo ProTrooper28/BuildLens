@@ -18,6 +18,12 @@ export {
   isNearDuplicateClaim,
 } from "./bundle";
 export { compareClaims, assembleBundle, sourcesFromOutcomes, type ClaimInput } from "./compare";
+export {
+  candidateFactsFrom,
+  claimTypeOf,
+  isCandidateMetadata,
+  isSubstantiveClaim,
+} from "./classify";
 export { EVIDENCE_CONCEPTS, type EvidenceConcept } from "./concepts";
 export { repositoryEvidence } from "./repository-source";
 export { websiteEvidence } from "./website-source";

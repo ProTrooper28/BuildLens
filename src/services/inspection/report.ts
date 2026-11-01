@@ -14,17 +14,30 @@
  */
 
 import type { StructuredEvaluation } from "@/services/evaluation-agent/schema";
+import { candidateFactsFrom } from "@/services/evidence/classify";
 import {
+  CLAIM_SOURCE_FINDING_LABELS,
   CLAIM_STATUS_LABELS,
+  CLAIM_TYPE_LABELS,
+  CLAIM_VERDICT_LABELS,
+  claimVerdictCounts,
+  verdictOf,
+  type ClaimCheck,
+  type ClaimSourceFinding,
   type EvidenceBundle,
   type EvidenceObservation,
   type EvidenceSourceReport,
   type ObservationArea,
 } from "@/services/evidence/types";
+import { claimTypeOf } from "@/services/evidence/classify";
+import { attentionFindings, buildFindings, severityCounts } from "./findings";
 import type {
+  ClaimVerificationRow,
   DeploymentRowId,
   DeploymentInspection,
   DeploymentRow,
+  EvidenceDimension,
+  Finding,
 } from "./types";
 import type { ProjectDetail } from "@/types/evaluation";
 import { detectProjectType, requiredInputs } from "./project-type";
@@ -659,36 +672,55 @@ const TONE_LEAD: Record<VerdictTone, string> = {
   unverified: "Not enough inspectable evidence",
 };
 
+/**
+ * Plain-language bullets for "What the judge should know".
+ *
+ * They summarise the risk picture rather than the evidence inventory: claim
+ * verification first, then the single most serious finding, then the state of
+ * the deployment and the repository. Grouped, never one line per claim.
+ */
 function judgeBullets(input: {
   type: ProjectType;
   counts: ClaimCounts & { total: number };
+  verdictCounts: ReturnType<typeof claimVerdictCounts> & { total: number };
   checks: readonly InspectionCheck[];
   bundle: EvidenceBundle | null;
   detail: ProjectDetail;
   tone: VerdictTone;
   missingInputs: string[];
+  findings: readonly Finding[];
 }): string[] {
-  const { counts, checks, bundle, detail, tone, missingInputs } = input;
+  const { counts, verdictCounts, bundle, detail, tone, missingInputs, findings } = input;
   const bullets: string[] = [];
 
   if (counts.total > 0) {
-    const unverified =
-      counts.partially_supported + counts.not_found + counts.could_not_verify;
-    bullets.push(
-      unverified === 0
-        ? `✓ All ${counts.total} checked claims are backed by the evidence that was read.`
-        : `⚠ ${counts.supported} of ${counts.total} claims are fully supported; ${unverified} need${unverified === 1 ? "s" : ""} closer attention.`,
-    );
+    const open =
+      verdictCounts.unverified + verdictCounts.unsupported + verdictCounts.contradicted;
+    const parts = [
+      `${verdictCounts.verified} of ${counts.total} claims verified`,
+      verdictCounts.partially_verified > 0 ? `${verdictCounts.partially_verified} partial` : null,
+      open > 0 ? `${open} unverified` : null,
+      verdictCounts.unsupported > 0 ? `${verdictCounts.unsupported} unsupported` : null,
+      verdictCounts.contradicted > 0 ? `${verdictCounts.contradicted} contradicted` : null,
+    ].filter(Boolean);
+    bullets.push(`${open === 0 ? "✓" : "⚠"} Claim verification: ${parts.join(" · ")}.`);
   } else {
     bullets.push("• No checkable claims were submitted, so claim verification could not run.");
+  }
+
+  const top = findings[0] ?? null;
+  if (top) {
+    const mark =
+      top.severity === "critical" ? "✕" : top.severity === "high" ? "⚠" : "•";
+    bullets.push(`${mark} ${clip(top.title, 120)} — ${clip(top.summary, 110)}`);
   }
 
   const site = bundle?.sources.find((source) => source.kind === "website") ?? null;
   if (detail.demoUrl) {
     bullets.push(
       site?.readable
-        ? `✓ The deployed application was reached and inspected.`
-        : `⚠ The submitted deployment could not be read, so live behaviour is unverified.`,
+        ? "✓ The deployed application was reached and its public page inspected."
+        : "⚠ The submitted deployment could not be read, so live behaviour is unverified.",
     );
   } else if (requiredInputs(input.type).website) {
     bullets.push("⚠ No deployed URL was submitted, so the live application is unverified.");
@@ -696,28 +728,9 @@ function judgeBullets(input: {
 
   const repo = bundle?.sources.find((source) => source.kind === "repository") ?? null;
   if (repo?.readable) {
-    const tests = (repo.observations ?? []).find((entry) => entry.id === "repo.code.tests");
-    bullets.push(
-      tests?.status === "good"
-        ? "✓ The repository contains implementation evidence, including automated tests."
-        : "⚠ The repository was read, but no automated tests were found.",
-    );
+    bullets.push("✓ The repository was read, and its code and configuration are the implementation evidence.");
   } else if (detail.repoUrl) {
     bullets.push("⚠ The repository could not be read, so implementation evidence is unverified.");
-  }
-
-  const critical = checks.filter((check) => check.status === "critical");
-  if (critical.length > 0) {
-    bullets.push(`✕ ${clip(critical[0]?.explanation ?? "A critical finding needs review.", 130)}`);
-  } else {
-    const security = checks.filter(
-      (check) => check.section === "security" && check.status === "warning",
-    );
-    bullets.push(
-      security.length > 0
-        ? `⚠ Security: ${clip(security[0]?.title ?? "one check", 60)} needs the judge's attention.`
-        : "✓ No critical security finding was detected in the public sources (server-side security was not tested).",
-    );
   }
 
   if (missingInputs.length > 0 && bullets.length < 5) {
@@ -727,6 +740,153 @@ function judgeBullets(input: {
   }
 
   return bullets.slice(0, 5);
+}
+
+/**
+ * Evidence-based dimension scores.
+ *
+ * A dimension is scored only when there is evidence to score it with, and every
+ * score carries the reason it moved — the judge can see "why 6/10" instead of
+ * trusting a number. No dimension is invented from a missing source.
+ */
+function buildDimensions(input: {
+  bundle: EvidenceBundle | null;
+  deployment: DeploymentInspection;
+  verdictCounts: ReturnType<typeof claimVerdictCounts> & { total: number };
+  findings: readonly Finding[];
+}): EvidenceDimension[] {
+  const { bundle, deployment, verdictCounts, findings } = input;
+  const observations = (bundle?.sources ?? []).flatMap((source) => source.observations ?? []);
+  const dimensions: EvidenceDimension[] = [];
+
+  if (verdictCounts.total > 0) {
+    const weighted =
+      verdictCounts.verified * 1 +
+      verdictCounts.partially_verified * 0.5 +
+      verdictCounts.unverified * 0.15 +
+      verdictCounts.unsupported * 0 +
+      verdictCounts.contradicted * 0;
+    const scored = verdictCounts.total - verdictCounts.unverified * 0.5;
+    dimensions.push({
+      id: "claims",
+      label: "Claim verification",
+      score: Math.max(0, Math.min(100, Math.round((weighted / Math.max(scored, 1)) * 100))),
+      reason: `${verdictCounts.verified} verified · ${verdictCounts.partially_verified} partial · ${verdictCounts.unverified} unverified · ${verdictCounts.unsupported} unsupported · ${verdictCounts.contradicted} contradicted.`,
+      section: "claims",
+    });
+  }
+
+  const security = observations.filter((observation) => observation.area === "security");
+  const securityMeasured = security.filter(
+    (observation) => observation.status === "good" || observation.status === "warning" || observation.status === "critical" || observation.status === "not_detected",
+  );
+  if (securityMeasured.length > 0) {
+    const critical = securityMeasured.filter((entry) => entry.status === "critical").length;
+    const warning = securityMeasured.filter((entry) => entry.status === "warning").length;
+    dimensions.push({
+      id: "security",
+      label: "Security",
+      score: Math.max(5, 100 - critical * 45 - warning * 15),
+      reason:
+        critical > 0
+          ? `${critical} critical and ${warning} warning security signal${warning === 1 ? "" : "s"} in the public sources.`
+          : warning > 0
+            ? `${warning} warning security signal${warning === 1 ? "" : "s"}; no critical exposure found in the public sources.`
+            : "No critical or warning security signal in the public sources. Server-side security was not tested.",
+      section: "security",
+    });
+  }
+
+  const performance = observations.filter((observation) => observation.area === "performance");
+  const measuredPerformance = performance.filter(
+    (observation) => observation.status !== "could_not_verify" && observation.status !== "info",
+  );
+  if (measuredPerformance.length > 0) {
+    const warning = measuredPerformance.filter((entry) => entry.status === "warning").length;
+    const critical = measuredPerformance.filter((entry) => entry.status === "critical").length;
+    dimensions.push({
+      id: "performance",
+      label: "Performance",
+      score: Math.max(10, 100 - warning * 20 - critical * 40),
+      reason:
+        warning + critical > 0
+          ? `${warning + critical} measured value${warning + critical === 1 ? " is" : "s are"} outside the recommended range.`
+          : "Measured response and asset behaviour were within the recommended range.",
+      section: "performance",
+    });
+  }
+
+  const functionality = observations.filter(
+    (observation) => observation.area === "functionality" || observation.area === "ux",
+  );
+  const measuredFunctionality = functionality.filter(
+    (observation) => observation.status !== "could_not_verify" && observation.status !== "info",
+  );
+  if (measuredFunctionality.length > 0) {
+    const negative = measuredFunctionality.filter(
+      (entry) => entry.status === "warning" || entry.status === "critical" || entry.status === "not_detected",
+    ).length;
+    dimensions.push({
+      id: "functionality",
+      label: "Functionality",
+      score: Math.max(15, 100 - negative * 25),
+      reason:
+        negative > 0
+          ? `${negative} of ${measuredFunctionality.length} observed functionality checks did not show the expected behaviour.`
+          : `${measuredFunctionality.length} observed functionality check${measuredFunctionality.length === 1 ? "" : "s"} showed the expected behaviour.`,
+      section: "functionality",
+    });
+  }
+
+  const quality = observations.find((observation) => observation.id === "repo.quality");
+  const qualityScore = quality?.result.match(/(\d{1,3})\/100/)?.[1];
+  if (qualityScore) {
+    dimensions.push({
+      id: "code",
+      label: "Code quality",
+      score: Number(qualityScore),
+      reason: clip(quality?.result ?? "", 140),
+      section: "repository",
+    });
+  }
+
+  const docs = observations.find((observation) => observation.id === "repo.code.docs");
+  if (docs) {
+    dimensions.push({
+      id: "documentation",
+      label: "Documentation",
+      score: docs.status === "good" ? 85 : docs.status === "warning" ? 40 : null,
+      reason: clip(docs.result, 140),
+      section: "repository",
+    });
+  }
+
+  if (deployment.applicable && deployment.rows.some((row) => row.status === "good")) {
+    dimensions.push({
+      id: "deployment",
+      label: "Deployment",
+      score: null,
+      reason: deployment.rows
+        .filter((row) => row.status !== "could_not_verify")
+        .map((row) => `${row.label}: ${row.value}`)
+        .join(" · "),
+      section: "deployment",
+    });
+  }
+
+  // Findings with no dimension of their own still explain the score picture.
+  const highFindings = findings.filter((entry) => entry.severity === "critical" || entry.severity === "high");
+  if (highFindings.length > 0 && dimensions.length === 0) {
+    dimensions.push({
+      id: "review",
+      label: "Review needed",
+      score: null,
+      reason: `${highFindings.length} finding${highFindings.length === 1 ? "" : "s"} need a judge's decision before scoring.`,
+      section: "claims",
+    });
+  }
+
+  return dimensions;
 }
 
 function buildDeployment(
@@ -816,6 +976,60 @@ function buildDeployment(
   };
 }
 
+/**
+ * The claim table: candidate claim → what each independent source showed →
+ * verdict. `not_checked` is never dressed up as a negative and is separated
+ * from `not_found`, which is what the readable sources actually showed.
+ */
+function claimsTableFor(
+  bundle: EvidenceBundle | null,
+  needsWebsite: boolean,
+): ClaimVerificationRow[] {
+  if (!bundle) return [];
+
+  return bundle.claims.map((claim) => {
+    const verdict = verdictOf(claim);
+    const claimType = claim.claimType ?? claimTypeOf(claim.claim, claim.category);
+    const repository: ClaimSourceFinding = claim.bySource?.repository ?? "not_checked";
+    const liveApp: ClaimSourceFinding = claim.bySource?.website ?? "not_checked";
+
+    const missingEvidence: string[] = [];
+    if (repository === "not_found") {
+      missingEvidence.push("No matching implementation was found in the repository.");
+    } else if (repository === "partial") {
+      missingEvidence.push("The repository shows only part of this claim.");
+    } else if (repository === "not_checked") {
+      missingEvidence.push(
+        "The repository was not read, so implementation evidence is missing.",
+      );
+    }
+    if (liveApp === "not_found") {
+      missingEvidence.push("The deployed application does not show this.");
+    } else if (liveApp === "partial") {
+      missingEvidence.push("The deployed application shows only part of this claim.");
+    } else if (liveApp === "not_checked" && needsWebsite) {
+      missingEvidence.push("The deployed application was not read, so live behaviour is untested.");
+    }
+
+    return {
+      id: claim.id,
+      claim: claim.claim,
+      claimType: CLAIM_TYPE_LABELS[claimType],
+      source: claim.sourceRef ?? (claim.id.startsWith("readme.") ? "README" : "Submission"),
+      pageRefs: claim.pageRefs ?? [],
+      repository,
+      liveApp,
+      verdict,
+      verdictLabel: CLAIM_VERDICT_LABELS[verdict],
+      note: claim.note,
+      evidenceRefs: claim.evidenceRefs ?? [],
+      quotes: claim.quotes,
+      missingEvidence,
+      contradiction: claim.contradiction ?? null,
+    };
+  });
+}
+
 function buildVerdict(
   detail: ProjectDetail,
   bundle: EvidenceBundle | null,
@@ -860,6 +1074,17 @@ function buildVerdict(
   const claims = bundle?.claims ?? [];
   const short = (value: string) => clip(value, 110);
 
+  const deployment = buildDeployment(detail, bundle, type, generatedAt);
+  const findings = buildFindings({ bundle, deployment, type });
+  const attention = attentionFindings(findings);
+  const verdictCounts = { ...claimVerdictCounts(claims), total: claims.length };
+  const dimensions = buildDimensions({ bundle, deployment, verdictCounts, findings });
+  const candidateProvided =
+    bundle?.candidateProvided && bundle.candidateProvided.length > 0
+      ? bundle.candidateProvided
+      : candidateFactsFrom(detail.presentationPages ?? null, detail.team ?? null);
+  const claimsTable = claimsTableFor(bundle, requiredInputs(type).website);
+
   const verified = claims
     .filter((claim) => claim.status === "supported")
     .map((claim) => short(claim.claim));
@@ -874,25 +1099,14 @@ function buildVerdict(
     ...verified.map((claim) => `Supported claim: ${claim}`),
   ].slice(0, 6);
 
-  const problems = [
-    ...checks
-      .filter((check) => check.status === "critical")
-      .map((check) => `${check.title}: ${clip(check.result, 100)}`),
-    ...checks
-      .filter((check) => check.status === "warning")
-      .map((check) => `${check.title}: ${clip(check.result, 100)}`),
-    ...claims
-      .filter((claim) => claim.status === "not_found")
-      .map((claim) => `Claim not found in the readable evidence: ${short(claim.claim)}`),
-  ].slice(0, 6);
+  // Problems are the grouped, severity-ranked findings — not one line per
+  // claim and not one line per observation. Risk decides order.
+  const problems = attention.map(
+    (entry) => `${entry.severity === "critical" ? "✕" : "⚠"} ${entry.title} — ${clip(entry.summary, 110)}`,
+  ).slice(0, 6);
 
   const security = checks
     .filter((check) => check.section === "security")
-    .map((check) => `${CHECK_STATUS_LABELS[check.status]} — ${clip(check.result, 110)}`)
-    .slice(0, 5);
-
-  const deployment = checks
-    .filter((check) => check.section === "deployment" || check.section === "functionality")
     .map((check) => `${CHECK_STATUS_LABELS[check.status]} — ${clip(check.result, 110)}`)
     .slice(0, 5);
 
@@ -903,28 +1117,37 @@ function buildVerdict(
     score: evaluation?.overallScore ?? null,
     aiAvailable: Boolean(evaluation),
     counts,
+    verdictCounts,
     claimed: claims.slice(0, 5).map((claim) => short(claim.claim)),
     verified: verified.slice(0, 5),
     unverified: unverified.slice(0, 5),
     problems,
     strengths,
     security,
+    claimsTable,
+    findings,
+    attention,
+    severityCounts: severityCounts(findings),
+    dimensions,
+    candidateProvided,
     aiSummary:
       evaluation?.finalSummary.verdict ?? evaluation?.summary ?? null,
     judgeBullets: judgeBullets({
       type,
       counts,
+      verdictCounts,
       checks,
       bundle,
       detail,
       tone,
       missingInputs,
+      findings,
     }),
     projectType: type,
     projectTypeLabel: PROJECT_TYPE_LABELS[type],
     strategy: PROJECT_TYPE_STRATEGY[type],
     missingInputs,
-    deployment: buildDeployment(detail, bundle, type, generatedAt),
+    deployment,
   };
 }
 

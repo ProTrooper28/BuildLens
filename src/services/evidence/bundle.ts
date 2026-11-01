@@ -14,6 +14,7 @@
 
 import type { EvaluationSubmission } from "@/services/evaluation-agent/schema";
 import type { IngestionOutcome } from "@/services/ingestion/types";
+import { candidateFactsFrom, claimTypeOf, isCandidateMetadata } from "./classify";
 import { assembleBundle, type ClaimInput } from "./compare";
 import type {
   ClaimCategory,
@@ -215,8 +216,15 @@ function isCheckableClaim(text: string, kind: ClaimKind): boolean {
   if (text.endsWith("?")) return false;
   if (HEADINGS.test(text.replace(/[.:]$/, "").trim())) return false;
   if (text.length >= MIN_CLAIM_CHARS) return true;
-  // Short items are kept only when they name a technology ("React", "AWS").
-  return kind === "technology" || kind === "ai";
+  // Short items are kept when they name a technology ("React", "AWS") or are a
+  // short noun phrase naming a capability ("Local CV", "Browser Extension").
+  // A short sentence fragment still has to look like a label, not prose.
+  const shortLabel = words(text).length <= 4 && /^[A-Za-z][\w &/+.-]*$/.test(text);
+  return kind === "technology" || kind === "ai" || shortLabel;
+}
+
+function words(text: string): string[] {
+  return text.split(/\s+/).filter(Boolean);
 }
 
 function pushClaim(
@@ -226,22 +234,31 @@ function pushClaim(
   idPrefix: string,
   index: number,
   pages: { page: number; text: string }[] | undefined,
+  sourceRef: string,
 ): void {
   const text = claim.replace(/\s+/g, " ").trim();
   if (!text) return;
   if ([...new Set(text)].length < 3) return;
+  // Candidate metadata (team ID, event name, title-page banner, diagram label)
+  // is reported separately as candidate-provided. It is not a claim, so it can
+  // never be marked verified, unverified or suspicious.
+  if (isCandidateMetadata(text)) return;
   if (target.some((entry) => isNearDuplicateClaim(entry.claim, text))) return;
 
   const kind = claimKindOf(text);
   if (!isCheckableClaim(text, kind)) return;
 
+  const pageRefs = pageRefsFor(text, pages);
   target.push({
     id: `${idPrefix}.${index}`,
     claim: text.slice(0, 400),
     category,
     kind,
+    claimType: claimTypeOf(text, category),
     nature: claimNatureOf(text),
-    pageRefs: pageRefsFor(text, pages),
+    pageRefs,
+    sourceRef:
+      pageRefs.length > 0 ? `${sourceRef} — slide ${pageRefs.join(", ")}` : sourceRef,
   });
 }
 
@@ -268,25 +285,65 @@ export function claimsFromSubmission(submission: EvaluationSubmission): ClaimInp
     ];
     for (const group of groups) {
       (group.items ?? []).forEach((item, index) =>
-        pushClaim(claims, group.category, item, `deck.${group.category}`, index, pages),
+        pushClaim(
+          claims,
+          group.category,
+          item,
+          `deck.${group.category}`,
+          index,
+          pages,
+          "Candidate deck",
+        ),
       );
     }
     if (deck.summary) {
-      pushClaim(claims, "description", deck.summary, "deck.summary", 0, pages);
+      pushClaim(claims, "description", deck.summary, "deck.summary", 0, pages, "Candidate deck");
     }
   }
 
   if (submission.description) {
-    pushClaim(claims, "description", submission.description, "submission.description", 0, pages);
+    pushClaim(
+      claims,
+      "description",
+      submission.description,
+      "submission.description",
+      0,
+      pages,
+      "Submission form",
+    );
   }
   if (submission.problemStatement) {
-    pushClaim(claims, "problem", submission.problemStatement, "submission.problem", 0, pages);
+    pushClaim(
+      claims,
+      "problem",
+      submission.problemStatement,
+      "submission.problem",
+      0,
+      pages,
+      "Submission form",
+    );
   }
   if (submission.solution) {
-    pushClaim(claims, "solution", submission.solution, "submission.solution", 0, pages);
+    pushClaim(
+      claims,
+      "solution",
+      submission.solution,
+      "submission.solution",
+      0,
+      pages,
+      "Submission form",
+    );
   }
   (submission.technologies ?? []).forEach((technology, index) =>
-    pushClaim(claims, "technology", technology, `submission.technology`, index, pages),
+    pushClaim(
+      claims,
+      "technology",
+      technology,
+      `submission.technology`,
+      index,
+      pages,
+      "Submission form (declared stack)",
+    ),
   );
 
   if (claims.length <= MAX_CLAIMS) return claims;
@@ -405,8 +462,10 @@ export function claimsFromDocumentation(
           claim: text.slice(0, 400),
           category: "features",
           kind,
+          claimType: claimTypeOf(text, "features"),
           nature: claimNatureOf(text),
           pageRefs: [],
+          sourceRef: "README",
         });
       }
     }
@@ -437,5 +496,9 @@ export function buildEvidenceBundle(
   return {
     ...bundle,
     sources: [submissionSource(submission), ...bundle.sources],
+    candidateProvided: candidateFactsFrom(
+      submission.presentation?.pages ?? null,
+      submission.team ?? null,
+    ),
   };
 }

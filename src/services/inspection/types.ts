@@ -17,8 +17,11 @@
  */
 
 import type {
+  CandidateFact,
   ClaimEvidenceStatus,
   ClaimKind,
+  ClaimSourceFinding,
+  ClaimVerdict,
   EvidenceSourceReport,
   ObservationStatus,
 } from "@/services/evidence/types";
@@ -204,6 +207,105 @@ export interface InspectionSection {
   empty: string | null;
 }
 
+/* ------------------------------------------------------- claim verification */
+
+/**
+ * One row of the CLAIM VERIFICATION table: what the candidate said, where they
+ * said it, what each independent source showed, and the verdict.
+ */
+export interface ClaimVerificationRow {
+  id: string;
+  claim: string;
+  claimType: string;
+  /** `PPT — slide 5`, `README`, `Submission form`. */
+  source: string;
+  pageRefs: number[];
+  /** What the repository showed. */
+  repository: ClaimSourceFinding;
+  /** What the deployed application showed. */
+  liveApp: ClaimSourceFinding;
+  verdict: ClaimVerdict;
+  verdictLabel: string;
+  /** Why the verdict was assigned, in plain language. */
+  note: string;
+  /** File paths / URLs behind the verdict. */
+  evidenceRefs: string[];
+  /** Verbatim snippets from the readable sources. */
+  quotes: string[];
+  /** What is missing before the claim could be verified. */
+  missingEvidence: string[];
+  /** The conflicting evidence, when the verdict is CONTRADICTED. */
+  contradiction: string | null;
+}
+
+/* ----------------------------------------------------------------- findings */
+
+/**
+ * Severity of a finding, in the risk order a judge reads them. Severity — not
+ * the order something was discovered — decides what reaches Judge Attention,
+ * so a missing README can never outrank a committed secret.
+ */
+export const FINDING_SEVERITIES = ["critical", "high", "medium", "low", "info"] as const;
+export type FindingSeverity = (typeof FINDING_SEVERITIES)[number];
+
+export const FINDING_AREAS = [
+  "security",
+  "claims",
+  "deployment",
+  "performance",
+  "functionality",
+  "documentation",
+  "code",
+  "evidence",
+] as const;
+export type FindingArea = (typeof FINDING_AREAS)[number];
+
+export const SEVERITY_LABELS: Record<FindingSeverity, string> = {
+  critical: "Critical",
+  high: "High",
+  medium: "Medium",
+  low: "Low",
+  info: "Info",
+};
+
+export const FINDING_AREA_LABELS: Record<FindingArea, string> = {
+  security: "Security",
+  claims: "Claim verification",
+  deployment: "Deployment",
+  performance: "Performance",
+  functionality: "Functionality",
+  documentation: "Documentation",
+  code: "Code quality",
+  evidence: "Evidence",
+};
+
+/**
+ * One grouped, prioritised thing that needs the judge's attention. Findings
+ * aggregate related observations (twenty unverified claims become one line with
+ * a count and three examples) so the section stays readable.
+ */
+export interface Finding {
+  id: string;
+  severity: FindingSeverity;
+  area: FindingArea;
+  areaLabel: string;
+  title: string;
+  summary: string;
+  items: string[];
+  count: number;
+  link: { section: InspectionSectionId; label: string };
+}
+
+/** A score with the evidence reason behind it, so the judge sees why it moved. */
+export interface EvidenceDimension {
+  id: string;
+  label: string;
+  /** null when there was not enough evidence to score the dimension. */
+  score: number | null;
+  reason: string;
+  section: InspectionSectionId;
+}
+
 /* --------------------------------------------------------------- deployment */
 
 /**
@@ -270,6 +372,15 @@ export interface ClaimCounts {
   could_not_verify: number;
 }
 
+/** The verdict counts the claim-verification headline reads out. */
+export interface VerdictCounts {
+  verified: number;
+  partially_verified: number;
+  unverified: number;
+  unsupported: number;
+  contradicted: number;
+}
+
 export interface JudgeVerdict {
   /** "Strong project, but 2 major claims could not be verified." */
   headline: string;
@@ -279,12 +390,25 @@ export interface JudgeVerdict {
   score: number | null;
   aiAvailable: boolean;
   counts: ClaimCounts & { total: number };
+  /** Verdict numbers shown above the claim table. */
+  verdictCounts: VerdictCounts & { total: number };
   claimed: string[];
   verified: string[];
   unverified: string[];
   problems: string[];
   strengths: string[];
   security: string[];
+  /** The CLAIM VERIFICATION table, in reading order. */
+  claimsTable: ClaimVerificationRow[];
+  /** Grouped, severity-ranked findings — the source of Judge Attention. */
+  findings: Finding[];
+  /** Only critical / high / medium findings: what a judge must look at. */
+  attention: Finding[];
+  severityCounts: Record<FindingSeverity, number>;
+  /** Evidence-based scores with the reason behind each one. */
+  dimensions: EvidenceDimension[];
+  /** Candidate-provided metadata: reported, never verified. */
+  candidateProvided: CandidateFact[];
   aiSummary: string | null;
   /** 3–5 plain-language bullets under "What the judge should know". */
   judgeBullets: string[];

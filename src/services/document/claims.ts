@@ -12,6 +12,7 @@
  * pass can replace or enrich this and set `method: "llm"`; the shape stays.
  */
 
+import { isCandidateMetadata } from "@/services/evidence/classify";
 import {
   MAX_CLAIMS_PER_CATEGORY,
   MAX_CLAIM_CHARS,
@@ -160,6 +161,10 @@ function categoryOf(line: string): { key: ClaimCategoryKey; inline: string | nul
 function pushClaim(buckets: CategoryBuckets, key: ClaimCategoryKey, raw: string): void {
   const claim = clipClaim(stripBullet(raw));
   if (claim.length < 3) return;
+  // Metadata, title-page banners and diagram labels are the candidate's own
+  // details, not claims: nothing can verify "Team ID 176743", so it must never
+  // reach the verification pipeline or a judge warning.
+  if (isCandidateMetadata(claim)) return;
   const bucket = buckets[key];
   if (bucket.some((existing) => existing.toLowerCase() === claim.toLowerCase())) return;
   if (bucket.length >= MAX_CLAIMS_PER_CATEGORY) return;
@@ -186,6 +191,23 @@ function impactSentences(text: string): string[] {
     if (hits.length >= MAX_CLAIMS_PER_CATEGORY) break;
   }
   return hits;
+}
+
+/**
+ * A title-page capability label: "Browser Extension", "Local CV".
+ *
+ * Decks often open with the product's capability labels before any category
+ * header. Short labels are claims (the repository can show them); sentences,
+ * titles with a dash and metadata are not.
+ */
+function preambleLabel(line: string): boolean {
+  const clean = stripBullet(line);
+  if (clean.length < 3 || clean.length > 40) return false;
+  const wordCount = clean.split(/\s+/).length;
+  if (wordCount > 3) return false;
+  if (/[.!?:;—–]/.test(clean)) return false;
+  if (!/^[A-Za-z][\w &/+.-]*$/.test(clean)) return false;
+  return !isCandidateMetadata(clean);
 }
 
 /** First meaningful lines before any category header → the deck's own pitch. */
@@ -231,6 +253,7 @@ export function extractDocumentClaims(text: string): DocumentClaims {
     }
     if (current === null) {
       preamble.push(line);
+      if (preambleLabel(line)) pushClaim(buckets, "features", line);
       continue;
     }
     pushClaim(buckets, current, line);

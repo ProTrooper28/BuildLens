@@ -43,7 +43,89 @@ export const CLAIM_STATUS_LABELS: Record<ClaimEvidenceStatus, string> = {
 
 /** Shown wherever claim statuses appear — the anti-“unverified means false” rule. */
 export const CLAIM_STATUS_DISCLAIMER =
-  "“Could not verify” means the evidence source was unreachable or not provided — it is not a negative finding. Only “Not found” means the readable sources were checked and did not show the claim.";
+  "“Could not verify” means the evidence source was unreachable or not provided — it is not a negative finding. “Not found” means the readable sources were checked and did not show the claim. Neither is proof that a claim is false; “Contradicted” is reserved for cases where the evidence actually conflicts with the claim.";
+
+/**
+ * The verdict a judge reads. It is derived from the status plus what each source
+ * actually showed — never from the model.
+ *
+ *   verified          — sufficient evidence supports the claim
+ *   partially_verified— part of the claim is supported
+ *   unverified        — insufficient evidence (nothing read, or nothing shown)
+ *   unsupported       — a quantified claim whose figure appears nowhere
+ *   contradicted      — the evidence actually conflicts with the claim
+ */
+export const CLAIM_VERDICTS = [
+  "verified",
+  "partially_verified",
+  "unverified",
+  "unsupported",
+  "contradicted",
+] as const;
+
+export type ClaimVerdict = (typeof CLAIM_VERDICTS)[number];
+
+export const CLAIM_VERDICT_LABELS: Record<ClaimVerdict, string> = {
+  verified: "Verified",
+  partially_verified: "Partially verified",
+  unverified: "Unverified",
+  unsupported: "Unsupported",
+  contradicted: "Contradicted",
+};
+
+/**
+ * What a claim is about. Metadata is not a claim: it is candidate-provided
+ * information that never enters the verification pipeline.
+ */
+export const CLAIM_TYPES = [
+  "metadata",
+  "problem",
+  "solution",
+  "feature",
+  "technology",
+  "impact",
+  "security_performance",
+  "general",
+] as const;
+
+export type ClaimType = (typeof CLAIM_TYPES)[number];
+
+export const CLAIM_TYPE_LABELS: Record<ClaimType, string> = {
+  metadata: "Candidate metadata",
+  problem: "Problem statement",
+  solution: "Solution claim",
+  feature: "Feature claim",
+  technology: "Technology claim",
+  impact: "Impact claim",
+  security_performance: "Security / performance claim",
+  general: "Project claim",
+};
+
+/** A fact the candidate stated about themselves, never independently verified. */
+export interface CandidateFact {
+  label: string;
+  value: string;
+  /** Where the candidate said it, e.g. `PPT — slide 1`. */
+  source: string;
+  page?: number;
+}
+
+/** What one verification source showed for a claim. */
+export const CLAIM_SOURCE_FINDINGS = [
+  "found",
+  "partial",
+  "not_found",
+  "not_checked",
+] as const;
+
+export type ClaimSourceFinding = (typeof CLAIM_SOURCE_FINDINGS)[number];
+
+export const CLAIM_SOURCE_FINDING_LABELS: Record<ClaimSourceFinding, string> = {
+  found: "Found",
+  partial: "Partial evidence",
+  not_found: "Not found",
+  not_checked: "Not checked",
+};
 
 /**
  * What a claim is about. Used to prioritise the claims a judge reads first and
@@ -198,7 +280,17 @@ export interface ClaimCheck {
   category: ClaimCategory;
   /** What the claim is about (features, security, AI usage, …). */
   kind?: ClaimKind;
+  /** The judged vocabulary: problem / solution / feature / technology / … */
+  claimType?: ClaimType;
   status: ClaimEvidenceStatus;
+  /** What the judge reads: verified / partial / unverified / unsupported / contradicted. */
+  verdict?: ClaimVerdict;
+  /** Where the candidate said it, e.g. `PPT — slide 5`. */
+  sourceRef?: string;
+  /** What each readable source showed, one cell per column of the claim table. */
+  bySource?: Partial<Record<"repository" | "website", ClaimSourceFinding>>;
+  /** The conflicting evidence, when the verdict is CONTRADICTED. */
+  contradiction?: string | null;
   /** Sources that either support the claim or were searched for it. */
   sources: EvidenceSourceKind[];
   /** Verbatim snippets from the readable sources (never invented). */
@@ -223,10 +315,38 @@ export interface EvidenceBundle {
   generatedAt: string;
   sources: EvidenceSourceReport[];
   claims: ClaimCheck[];
+  /**
+   * What the candidate stated about themselves (team ID, event, category).
+   * Reported, never verified — deliberately kept out of `claims`.
+   */
+  candidateProvided?: CandidateFact[];
   /** Sources that were not readable, phrased as gaps (never as failures of the team). */
   gaps: string[];
   counts: Record<ClaimEvidenceStatus, number>;
   disclaimer: string;
+}
+
+/** Verdict counts, in the order the judge reads them. */
+export function claimVerdictCounts(
+  claims: readonly ClaimCheck[],
+): Record<ClaimVerdict, number> {
+  const counts: Record<ClaimVerdict, number> = {
+    verified: 0,
+    partially_verified: 0,
+    unverified: 0,
+    unsupported: 0,
+    contradicted: 0,
+  };
+  for (const claim of claims) counts[verdictOf(claim)] += 1;
+  return counts;
+}
+
+/** Stored bundles predate the verdict field: derive it from the status. */
+export function verdictOf(claim: ClaimCheck): ClaimVerdict {
+  if (claim.verdict) return claim.verdict;
+  if (claim.status === "supported") return "verified";
+  if (claim.status === "partially_supported") return "partially_verified";
+  return "unverified";
 }
 
 /** Convenience for UI + scoring: how much of the claim set has real support. */

@@ -1,4 +1,4 @@
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import {
   AlertTriangle,
   ArrowRight,
@@ -9,7 +9,6 @@ import {
   MinusCircle,
   RefreshCw,
   ScanSearch,
-  ShieldCheck,
   Sparkles,
   XCircle,
 } from "lucide-react";
@@ -19,20 +18,25 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { LineSkeletons } from "@/components/state/skeletons";
 import { VerdictToneBadge } from "@/components/evaluation/inspection-ui";
+import { ClaimVerification } from "@/components/evaluation/ClaimVerification";
+import { AttentionSummary, JudgeAttention } from "@/components/evaluation/JudgeAttention";
 import type { EvidencePhase } from "@/hooks/useEvidenceRun";
 import { cn } from "@/lib/utils";
 import type { InspectionReport } from "@/services/inspection/types";
 
 /**
- * Judge summary.
+ * Judge summary — the default screen.
  *
- * The default screen: what the team claimed, what was verified, what was not,
- * what looks good, what looks wrong, and what needs attention — in plain
- * language, with no file paths or headers. Technical evidence lives behind
- * "View Detailed Analysis".
+ * Structure follows the order a judge actually thinks in:
  *
- * Every statement here comes from the deterministic inspection report; the
- * component never summarises on its own and never invents a finding.
+ *   EXECUTIVE SUMMARY   what the verdict is and why the score moved
+ *   CANDIDATE-PROVIDED  what the team states about itself (never verified)
+ *   JUDGE ATTENTION     the few grouped, risk-ranked issues that need a human
+ *   CLAIM VERIFICATION  every claim → source → repository → live app → verdict
+ *   WHAT WAS READ       what the team claims, what was verified, what was not
+ *
+ * Every statement comes from the deterministic inspection report; this component
+ * never summarises on its own and never invents a finding.
  */
 
 export interface JudgeSummaryProps {
@@ -127,6 +131,7 @@ export function JudgeSummary({
 }: JudgeSummaryProps) {
   const running = phase === "starting" || phase === "running";
   const verdict = report?.verdict ?? null;
+  const navigate = useNavigate();
 
   return (
     <Card
@@ -159,7 +164,7 @@ export function JudgeSummary({
         )}
       </CardHeader>
 
-      <CardContent className="space-y-5 pt-4">
+      <CardContent className="space-y-6 pt-4">
         {running && (
           <div className="space-y-3" aria-live="polite">
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -222,38 +227,104 @@ export function JudgeSummary({
 
         {!running && report && verdict && (
           <>
-            <div>
+            {/* 1. EXECUTIVE SUMMARY */}
+            <section id="executive-summary" className="scroll-mt-24 space-y-2">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <h2 className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                  Executive summary
+                </h2>
+                <AttentionSummary counts={verdict.severityCounts} />
+              </div>
               <p className="text-base font-semibold leading-snug">{verdict.headline}</p>
-              <p className="mt-1 text-xs text-muted-foreground">{verdict.strategy}</p>
-            </div>
+              <p className="text-xs text-muted-foreground">{verdict.strategy}</p>
 
-            <ul className="flex flex-wrap gap-1.5">
-              <CountChip
-                icon={CheckCircle2}
-                count={verdict.counts.supported}
-                label="supported"
-                className="border-success/30 bg-success/10 text-success"
-              />
-              <CountChip
-                icon={CircleDashed}
-                count={verdict.counts.partially_supported}
-                label="partially supported"
-                className="border-warning/30 bg-warning/10 text-warning"
-              />
-              <CountChip
-                icon={MinusCircle}
-                count={verdict.counts.not_found}
-                label="not found"
-                className="border-border bg-muted/60 text-muted-foreground"
-              />
-              <CountChip
-                icon={HelpCircle}
-                count={verdict.counts.could_not_verify}
-                label="could not be verified"
-                className="border-primary/25 bg-primary/[0.07] text-primary"
-              />
-            </ul>
+              <ul className="flex flex-wrap gap-1.5 pt-1">
+                <CountChip
+                  icon={CheckCircle2}
+                  count={verdict.counts.supported}
+                  label="supported"
+                  className="border-success/30 bg-success/10 text-success"
+                />
+                <CountChip
+                  icon={CircleDashed}
+                  count={verdict.counts.partially_supported}
+                  label="partially supported"
+                  className="border-warning/30 bg-warning/10 text-warning"
+                />
+                <CountChip
+                  icon={MinusCircle}
+                  count={verdict.counts.not_found}
+                  label="not found"
+                  className="border-border bg-muted/60 text-muted-foreground"
+                />
+                <CountChip
+                  icon={HelpCircle}
+                  count={verdict.counts.could_not_verify}
+                  label="could not be verified"
+                  className="border-primary/25 bg-primary/[0.07] text-primary"
+                />
+              </ul>
 
+              {verdict.dimensions.length > 0 && (
+                <ul className="space-y-1 pt-1">
+                  {verdict.dimensions.slice(0, 4).map((dimension) => (
+                    <li
+                      key={dimension.id}
+                      className="flex flex-wrap items-baseline gap-x-2 text-[11px] leading-snug"
+                    >
+                      <span className="font-medium text-foreground/85">{dimension.label}</span>
+                      <span className="tabular-nums text-muted-foreground">
+                        {dimension.score === null ? "not scored" : `${dimension.score}/100`}
+                      </span>
+                      <span className="min-w-0 flex-1 text-muted-foreground">{dimension.reason}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+
+            {/* Candidate metadata: reported, never verified. */}
+            {verdict.candidateProvided.length > 0 && (
+              <section id="candidate-provided" className="scroll-mt-24">
+                <h2 className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                  Candidate-provided
+                </h2>
+                <ul className="mt-1.5 grid gap-1 sm:grid-cols-2">
+                  {verdict.candidateProvided.map((fact) => (
+                    <li
+                      key={`${fact.label}-${fact.value}`}
+                      className="flex flex-wrap items-baseline gap-x-1.5 text-xs"
+                    >
+                      <span className="text-muted-foreground">{fact.label}:</span>
+                      <span className="font-medium text-foreground/90">{fact.value}</span>
+                      <span className="text-[10px] text-muted-foreground/70">({fact.source})</span>
+                    </li>
+                  ))}
+                </ul>
+                <p className="mt-1 text-[10px] text-muted-foreground">
+                  Stated by the candidate. BuildLens did not verify these details and does not
+                  count them as claims.
+                </p>
+              </section>
+            )}
+
+            {/* 2. JUDGE ATTENTION — grouped, severity-ranked. Each finding links
+                to the exact section that holds its evidence. */}
+            <JudgeAttention
+              findings={verdict.attention}
+              onNavigate={(section) =>
+                void navigate({
+                  to: "/evaluation/project/$id/analysis",
+                  params: { id: submissionId },
+                  hash: `section-${section}`,
+                })
+              }
+            />
+
+            {/* 3. CLAIM VERIFICATION — claim → source → repository → app → verdict */}
+            <ClaimVerification claims={verdict.claimsTable} counts={verdict.verdictCounts} />
+
+            {/* 4. WHAT WAS READ */}
             <div className="grid gap-4 sm:grid-cols-2">
               <ListBlock
                 title="What the team claims"
@@ -277,49 +348,34 @@ export function JudgeSummary({
                 iconClassName="text-primary"
               />
               <ListBlock
-                title="Important problems"
-                items={verdict.problems}
-                empty="No problem was found in the evidence that was read."
-                icon={AlertTriangle}
-                iconClassName="text-warning"
-              />
-              <ListBlock
                 title="Important strengths"
                 items={verdict.strengths}
                 empty="No strength was recorded yet."
                 icon={CheckCircle2}
                 iconClassName="text-success"
               />
-              <ListBlock
-                title="Security & deployment"
-                items={[
-                  ...verdict.security,
-                  verdict.deployment.rows.length > 0
-                    ? verdict.deployment.rows
-                        .filter((row) => row.status !== "could_not_verify")
-                        .map((row) => `${row.label}: ${row.value}`)
-                    : verdict.deployment.applicable
-                      ? "No deployment check ran."
-                      : "Deployment check not required for this project type.",
-                ].flat()}
-                empty="No security or deployment check could run."
-                icon={ShieldCheck}
-                iconClassName="text-muted-foreground"
-              />
             </div>
 
-            <div className="rounded-lg border border-border/60 bg-muted/20 p-3">
-              <h3 className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                <Sparkles className="h-3 w-3" aria-hidden />
-                AI summary
-              </h3>
-              <p className="mt-1.5 text-sm leading-relaxed text-foreground/85">
-                {verdict.aiSummary ??
-                  (partial
-                    ? "The AI summary is unavailable for this run. The findings above were produced without it and are still complete."
-                    : "No AI narrative was produced. Nothing was invented to replace it — the findings above come straight from the evidence.")}
-              </p>
-            </div>
+            {verdict.findings.some((finding) =>
+              ["low", "info"].includes(finding.severity),
+            ) && (
+              <div className="rounded-lg border border-border/60 bg-muted/20 p-3">
+                <h3 className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                  Minor observations
+                </h3>
+                <ul className="mt-1.5 space-y-1">
+                  {verdict.findings
+                    .filter((finding) => finding.severity === "low")
+                    .slice(0, 4)
+                    .map((finding) => (
+                      <li key={finding.id} className="flex gap-1.5 text-xs leading-snug text-foreground/80">
+                        <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" aria-hidden />
+                        <span className="min-w-0">{finding.title}</span>
+                      </li>
+                    ))}
+                </ul>
+              </div>
+            )}
 
             <div className="rounded-lg border border-primary/20 bg-primary/[0.04] p-3">
               <h3 className="text-[11px] font-medium uppercase tracking-wide text-primary">

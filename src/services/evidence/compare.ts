@@ -37,6 +37,9 @@ import {
   type ClaimEvidenceStatus,
   type ClaimKind,
   type ClaimNature,
+  type ClaimSourceFinding,
+  type ClaimType,
+  type ClaimVerdict,
   type EvidenceBundle,
   type EvidenceSegmentKind,
   type EvidenceSourceReport,
@@ -49,8 +52,12 @@ export interface ClaimInput {
   category: ClaimCategory;
   /** What the claim is about — used for ordering and labels only. */
   kind?: ClaimKind;
+  /** The judged vocabulary (feature, technology, impact, …). */
+  claimType?: ClaimType;
   /** Slide/page numbers where the claim was found in the deck. */
   pageRefs?: number[];
+  /** Where the candidate said it, e.g. `Candidate deck — slide 5`. */
+  sourceRef?: string;
   /** Whether the claim can be decided at all (marketing / impact → no). */
   nature?: ClaimNature;
 }
@@ -353,6 +360,23 @@ const TECHNOLOGY_WORDS = new Set([
   "ios",
 ]);
 
+/**
+ * Technologies that occupy the same slot in a stack. Only used to prove a
+ * CONTRADICTION: the repository declaring Vue while the deck claims React is
+ * evidence against the claim, while the absence of a name alone never is.
+ */
+const TECHNOLOGY_FAMILIES: readonly (readonly string[])[] = [
+  ["react", "vue", "svelte", "angular", "next", "nuxt", "solid"],
+  ["node", "express", "fastify", "django", "flask", "fastapi", "rails", "laravel", "spring"],
+  ["postgres", "postgresql", "mysql", "mongo", "mongodb", "redis", "sqlite"],
+  ["tensorflow", "pytorch", "keras", "sklearn", "scikit"],
+];
+
+function familyOf(word: string): readonly string[] | null {
+  for (const family of TECHNOLOGY_FAMILIES) if (family.includes(word)) return family;
+  return null;
+}
+
 /* ------------------------------------------------------------------ units */
 
 /**
@@ -616,7 +640,10 @@ function baseCheck(claim: ClaimInput, nature: ClaimNature): ClaimCheck {
     claim: claim.claim,
     category: claim.category,
     kind: claim.kind ?? "general",
+    ...(claim.claimType ? { claimType: claim.claimType } : {}),
     status: "could_not_verify",
+    verdict: "unverified",
+    ...(claim.sourceRef ? { sourceRef: claim.sourceRef } : {}),
     sources: [],
     quotes: [],
     pageRefs: claim.pageRefs ?? [],
@@ -624,6 +651,31 @@ function baseCheck(claim: ClaimInput, nature: ClaimNature): ClaimCheck {
     nature,
     note: "",
   };
+}
+
+/**
+ * The verdict a judge reads, from the status plus the two things that make
+ * UNSUPPORTED and CONTRADICTED different from plain UNVERIFIED:
+ *
+ *   • a quantified claim whose figure appears nowhere is UNSUPPORTED — it made
+ *     a measurable promise the evidence does not keep;
+ *   • a claim the evidence actively conflicts with is CONTRADICTED.
+ *
+ * Everything else that was not backed stays UNVERIFIED, never “false”.
+ */
+function verdictFor(input: {
+  status: ClaimEvidenceStatus;
+  contradiction: string | null;
+  quantified: boolean;
+  numbersFound: number;
+}): ClaimVerdict {
+  if (input.contradiction) return "contradicted";
+  if (input.status === "supported") return "verified";
+  if (input.status === "partially_supported") return "partially_verified";
+  if (input.status === "not_found" && input.quantified && input.numbersFound === 0) {
+    return "unsupported";
+  }
+  return "unverified";
 }
 
 /** Compare every claim with every readable verification source. */
@@ -785,9 +837,97 @@ export function compareClaims(
         ? unique(matches.flatMap((entry) => entry.quotes)).slice(0, 3)
         : [];
 
+    /**
+     * What THIS source showed, so the claim table has a real cell per source
+     * instead of a copy of the overall verdict.
+     */
+    const findingFor = (kind: "repository" | "website"): ClaimSourceFinding => {
+      const outcome = readable.find((entry) => entry.kind === kind);
+      if (!outcome) return "not_checked";
+      const unitsOfSource = units.filter(
+        (entry) => entry.source === kind && !entry.documentation,
+      );
+      if (unitsOfSource.length === 0) return "not_checked";
+
+      const hit = matches.find(
+        (entry) => entry.unit.source === kind && !entry.unit.documentation && entry.matched.size > 0,
+      );
+      const backed = backings.some((entry) => entry.sources.includes(kind));
+      if (!hit && !backed) return "not_found";
+
+      // A number the claim promises has to appear in this source too.
+      const sourceNumbers = claimNumbers.filter((number) =>
+        unitsOfSource.some((entry) => normalize(entry.text).includes(number)),
+      );
+      if (claimNumbers.length > 0 && sourceNumbers.length < claimNumbers.length) return "partial";
+
+      const sourceMissing = hit
+        ? claimWords.filter(
+            (word) => !GENERIC_CLAIM_WORDS.has(word.raw) && !hit.matched.has(word.stem),
+          )
+        : [];
+      return status === "supported" && sourceMissing.length === 0 ? "found" : "partial";
+    };
+
+    /**
+     * CONTRADICTED is deliberately narrow: it needs evidence that conflicts,
+     * not evidence that is merely absent. Today that means the repository
+     * declaring a different technology from the same slot as the claim
+     * ("React" claimed, Vue declared, no React anywhere).
+     */
+    let contradiction: string | null = null;
+    if (technologyWords.length > 0 && technologiesMissing.length > 0) {
+      const repositoryWords = new Set(
+        wordList(
+          units
+            .filter((entry) => entry.source === "repository" && !entry.documentation)
+            .map((entry) => entry.text)
+            .join(" "),
+        ).map((word) => word.raw),
+      );
+      for (const absent of technologiesMissing) {
+        const family = familyOf(absent.raw);
+        if (!family) continue;
+        const alternative = family.find((name) => name !== absent.raw && repositoryWords.has(name));
+        if (alternative) {
+          contradiction = `The repository declares ${alternative} instead of ${absent.raw}, which the claim states.`;
+          break;
+        }
+      }
+    }
+
+    const verdict = verdictFor({
+      status,
+      contradiction,
+      quantified: claimNumbers.length > 0,
+      numbersFound: numbersFound.length,
+    });
+
+    const bySource: Partial<Record<"repository" | "website", ClaimSourceFinding>> =
+      nature === "checkable"
+        ? { repository: findingFor("repository"), website: findingFor("website") }
+        : { repository: "not_checked", website: "not_checked" };
+
+    const explanation =
+      status === "could_not_verify" && nothingSpecific
+        ? "This claim does not name anything checkable — only general wording — so it could not be verified from the sources. It needs your own judgement and is not counted as a missing feature."
+        : noteFor({
+            status,
+            nature,
+            readSources,
+            gaps,
+            refs,
+            missing: substantiveMissing,
+            placeholder,
+            viaConcepts: backings.map((entry) => entry.concept.label),
+          });
+
     return {
       ...base,
       status,
+      verdict,
+      bySource,
+      contradiction,
       sources,
       quotes,
       evidenceRefs:
@@ -796,19 +936,7 @@ export function compareClaims(
             ? searchedRefs
             : readSources
           : refs,
-      note:
-        status === "could_not_verify" && nothingSpecific
-          ? "This claim does not name anything checkable — only general wording — so it could not be verified from the sources. It needs your own judgement and is not counted as a missing feature."
-          : noteFor({
-              status,
-              nature,
-              readSources,
-              gaps,
-              refs,
-              missing: substantiveMissing,
-              placeholder,
-              viaConcepts: backings.map((entry) => entry.concept.label),
-            }),
+      note: contradiction ? `${explanation} ${contradiction}` : explanation,
     };
   });
 }

@@ -392,8 +392,16 @@ export function deriveVerdictFromReport(view: ReportView): AiVerdictData {
       `Probe critical risk: ${risk.title}${risk.mitigation ? ` (Proposed mitigation: ${risk.mitigation})` : ""}`,
     );
   }
-  for (const claim of view.claims.filter((c) => !c.verified)) {
-    judgeAttentionAreas.push(`Request demonstration or code proof for: "${claim.claim}"`);
+  // Unverified claims are grouped into one line with examples. One warning per
+  // claim turned a deck into a wall of noise and hid the real risks.
+  const unverifiedClaims = view.claims.filter((claim) => !claim.verified);
+  if (unverifiedClaims.length > 0) {
+    const named = unverifiedClaims.slice(0, 3).map((claim) => `"${claim.claim}"`).join(", ");
+    judgeAttentionAreas.push(
+      unverifiedClaims.length === 1
+        ? `Verify 1 unverified claim with the team: ${named}`
+        : `Verify ${unverifiedClaims.length} unverified claims with the team: ${named}${unverifiedClaims.length > 3 ? `, +${unverifiedClaims.length - 3} more` : ""}`,
+    );
   }
   for (const rec of view.recommendations.slice(0, 2)) {
     judgeAttentionAreas.push(`Recommendation check: ${rec.title}`);

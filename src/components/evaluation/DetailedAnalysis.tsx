@@ -15,6 +15,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { CheckStatusBadge, EvidenceBasisChip, VerdictToneBadge, DeploymentRowRow } from "@/components/evaluation/inspection-ui";
+import { ClaimVerification } from "@/components/evaluation/ClaimVerification";
+import { JudgeAttention } from "@/components/evaluation/JudgeAttention";
 import { useEvidenceRun } from "@/hooks/useEvidenceRun";
 import { useSubmissionDetail } from "@/hooks/useJudging";
 import { buildInspectionReport } from "@/services/inspection";
@@ -220,6 +222,43 @@ function DetailedAnalysisView({ detail }: { detail: ProjectDetail }) {
                   </a>
                 ))}
               </nav>
+            </CardContent>
+          </Card>
+
+          <Card className="border-border/70 bg-card/50">
+            <CardContent className="space-y-5 pt-5">
+              {report.verdict.candidateProvided.length > 0 && (
+                <div>
+                  <h2 className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                    Candidate-provided
+                  </h2>
+                  <ul className="mt-1.5 grid gap-1 sm:grid-cols-2">
+                    {report.verdict.candidateProvided.map((fact) => (
+                      <li
+                        key={`${fact.label}-${fact.value}`}
+                        className="flex flex-wrap items-baseline gap-x-1.5 text-xs"
+                      >
+                        <span className="text-muted-foreground">{fact.label}:</span>
+                        <span className="font-medium text-foreground/90">{fact.value}</span>
+                        <span className="text-[10px] text-muted-foreground/70">
+                          ({fact.source})
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                  <p className="mt-1 text-[10px] text-muted-foreground">
+                    Stated by the candidate. Not verified and not counted as claims.
+                  </p>
+                </div>
+              )}
+
+              <JudgeAttention findings={report.verdict.attention} />
+
+              <ClaimVerification
+                claims={report.verdict.claimsTable}
+                counts={report.verdict.verdictCounts}
+                id="detailed-claims"
+              />
             </CardContent>
           </Card>
 
