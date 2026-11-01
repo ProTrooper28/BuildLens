@@ -11,6 +11,7 @@ import {
   Github,
   Globe,
   Lock,
+  MessageSquarePlus,
   Scale,
   Sparkles,
   TriangleAlert,
@@ -21,6 +22,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ScoreRing } from "@/components/ScoreRing";
 import { ScoringPanel } from "@/components/evaluation/ScoringPanel";
+import { JudgeCopilotPanel } from "@/components/hackathons/JudgeCopilotPanel";
 import { portalKeys, useJudgeProject } from "@/hooks/useHackathonPortal";
 import { useEvaluationRecorder, useJudgeIdentity } from "@/hooks/useJudging";
 import { awardedTotal, criterionTargets } from "@/lib/evaluation/scoring";
@@ -29,7 +31,13 @@ import { notify } from "@/lib/toast-messages";
 import { setPublishedResult, submissionStatusLabel } from "@/services/hackathon.service";
 import type { JudgeProject } from "@/services/portal.service";
 import { cn } from "@/lib/utils";
-import type { CriterionScore, EvaluationRecommendation, JudgeEvaluation } from "@/types/evaluation";
+import type {
+  CriterionScore,
+  EvaluationRecommendation,
+  JudgeEvaluation,
+  JudgeQuestion,
+  JudgeReview,
+} from "@/types/evaluation";
 
 /**
  * One submission, one page: what the candidate sent, the BuildLens analysis, the
@@ -41,7 +49,7 @@ import type { CriterionScore, EvaluationRecommendation, JudgeEvaluation } from "
  * are stored side by side and the judge's carries the final authority.
  */
 
-type ProjectTab = "submission" | "ai" | "manual" | "compare";
+type ProjectTab = "submission" | "ai" | "copilot" | "manual" | "compare";
 
 /** One rubric line with the score the AI score implies for it. */
 type CriterionSuggestion = {
@@ -52,6 +60,7 @@ type CriterionSuggestion = {
 const TABS: { id: ProjectTab; label: string; icon: typeof FileText }[] = [
   { id: "submission", label: "View submission", icon: FileText },
   { id: "ai", label: "AI evaluation", icon: Sparkles },
+  { id: "copilot", label: "Questions & review", icon: MessageSquarePlus },
   { id: "manual", label: "Manual evaluation", icon: Gavel },
   { id: "compare", label: "Compare", icon: Scale },
 ];
@@ -170,7 +179,10 @@ function ProjectView({
     );
   };
 
-  const persist = async (status: "in_progress" | "evaluated") => {
+  const persist = async (
+    status: "in_progress" | "evaluated",
+    copilot?: { questions?: JudgeQuestion[]; review?: JudgeReview | null },
+  ) => {
     const record: JudgeEvaluation = await recorder.mutateAsync({
       submissionId: `project:${submission.id}`,
       category: "project",
@@ -181,9 +193,38 @@ function ProjectView({
       note: note.trim() ? { body: note, visibility: "private" } : null,
       criteria,
       status,
+      ...(copilot?.questions !== undefined ? { questions: copilot.questions } : {}),
+      ...(copilot?.review !== undefined ? { review: copilot.review } : {}),
     });
     setDirty(false);
     return record;
+  };
+
+  /** Persist question state without touching scores or the submission status. */
+  const saveQuestions = async (questions: JudgeQuestion[]) => {
+    setSaving(true);
+    try {
+      await persist("in_progress", { questions });
+      notify.success("Questions saved", "The state is stored with this submission.");
+      await refreshAll();
+    } catch {
+      notify.error("Couldn't save the questions", "Nothing was lost on screen — try again.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const saveReview = async (review: JudgeReview) => {
+    setSaving(true);
+    try {
+      await persist("in_progress", { review });
+      notify.success("Review saved", "Only judges can see this review.");
+      await refreshAll();
+    } catch {
+      notify.error("Couldn't save the review", "Your text is still on screen — try again.");
+    } finally {
+      setSaving(false);
+    }
   };
 
   const refreshAll = async () => {
@@ -383,6 +424,15 @@ function ProjectView({
           <SubmissionPanel data={data} />
         ) : tab === "ai" ? (
           <AnalysisPanel data={data} insights={insights} />
+        ) : tab === "copilot" ? (
+          <JudgeCopilotPanel
+            view={analysis.view}
+            storedQuestions={myEvaluation?.questions ?? []}
+            storedReview={myEvaluation?.review ?? null}
+            saving={saving || recorder.isPending}
+            onSaveQuestions={saveQuestions}
+            onSaveReview={saveReview}
+          />
         ) : tab === "manual" ? (
           <ManualPanel
             aiScore={aiScore}

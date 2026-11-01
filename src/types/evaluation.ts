@@ -79,6 +79,56 @@ export interface JudgeNote {
 }
 
 /** One judge's evaluation of one submission. */
+/* ----------------------------------------------------------- judge copilot */
+
+export type JudgeQuestionCategory =
+  "technical" | "functionality" | "security" | "performance" | "claim" | "product";
+
+export type JudgeQuestionPriority = "high" | "medium" | "low";
+
+export type JudgeQuestionStatus = "pending" | "asked" | "answered";
+
+/**
+ * One question for the team. Generated questions quote the evidence they came
+ * from; judge-written ones are stored beside them with the same status.
+ */
+export interface JudgeQuestion {
+  id: string;
+  category: JudgeQuestionCategory;
+  question: string;
+  /** Why this is worth asking — shown to the judge only. */
+  why: string;
+  /** The observation, claim or measurement behind the question. */
+  evidence: string;
+  priority: JudgeQuestionPriority;
+  source: "evidence" | "judge";
+  status: JudgeQuestionStatus;
+  note: string | null;
+}
+
+/** The mentor's structured review — persisted with the evaluation. */
+export interface JudgeReview {
+  /** Free-text overall assessment. */
+  assessment: string;
+  strengths: string[];
+  weaknesses: string[];
+  suggestions: string[];
+  concerns: string[];
+  /** The mentor's decision; `null` until they choose one. */
+  recommendation: EvaluationRecommendation;
+  updatedAt: string;
+}
+
+/** One candidate-safe improvement: problem → why it matters → what to do. */
+export interface ImprovementSuggestion {
+  id: string;
+  /** Documentation, Performance, Security, Claim clarity, Deployment, … */
+  area: string;
+  problem: string;
+  why: string;
+  recommendation: string;
+}
+
 export interface JudgeEvaluation {
   id: string;
   submissionId: string;
@@ -88,6 +138,13 @@ export interface JudgeEvaluation {
   status: EvaluationRecordStatus;
   scores: CriterionScore[];
   notes: JudgeNote | null;
+  /**
+   * Questions asked of the team (generated + judge-written), with their state.
+   * Optional so records written before the copilot existed stay valid.
+   */
+  questions?: JudgeQuestion[];
+  /** The mentor's structured review, or null before they save one. */
+  review?: JudgeReview | null;
   recommendation: EvaluationRecommendation;
   /**
    * The criteria the judge scored against. Snapshotted so an ADministrator

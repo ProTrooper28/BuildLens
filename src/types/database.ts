@@ -219,6 +219,10 @@ export interface Database {
           recommendation: EvaluationRecommendationRow | null;
           scores: Json;
           criteria_snapshot: Json | null;
+          /** Judge copilot questions (migration 0011). */
+          questions: Json;
+          /** Structured mentor review (migration 0011). */
+          review: Json | null;
           ai_score: number | null;
           ai_criteria_scores: Json | null;
           ai_reasoning: string | null;
@@ -239,6 +243,8 @@ export interface Database {
           recommendation?: EvaluationRecommendationRow | null;
           scores?: Json;
           criteria_snapshot?: Json | null;
+          questions?: Json;
+          review?: Json | null;
           ai_score?: number | null;
           ai_criteria_scores?: Json | null;
           ai_reasoning?: string | null;
@@ -259,6 +265,8 @@ export interface Database {
           recommendation?: EvaluationRecommendationRow | null;
           scores?: Json;
           criteria_snapshot?: Json | null;
+          questions?: Json;
+          review?: Json | null;
           ai_score?: number | null;
           ai_criteria_scores?: Json | null;
           ai_reasoning?: string | null;

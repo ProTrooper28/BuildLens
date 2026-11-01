@@ -67,7 +67,8 @@ export function SubmissionStatusPage({ submissionId }: { submissionId: string })
     );
   }
 
-  const { submission, hackathon, projectName, statusLabel, checks, steps, result } = data;
+  const { submission, hackathon, projectName, statusLabel, checks, steps, result, suggestions } =
+    data;
   const lifecycle =
     submission.status === "evaluated" || submission.status === "finalized"
       ? statusLabel
@@ -221,6 +222,39 @@ export function SubmissionStatusPage({ submissionId }: { submissionId: string })
                 : "Judge scores, notes and rankings stay private until the organizers publish a result."}
             </p>
           </section>
+
+          {suggestions.length > 0 && (
+            <section className="surface p-5">
+              <h2 className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                Improvement suggestions
+              </h2>
+              <p className="mt-1 text-xs text-muted-foreground">
+                What the analysis could not confirm, and what would make it clearer.
+              </p>
+              <ul className="mt-3 space-y-3">
+                {suggestions.map((suggestion) => (
+                  <li key={suggestion.id} className="rounded-lg border border-border/70 p-3">
+                    <p className="text-xs font-medium uppercase tracking-[0.1em] text-muted-foreground">
+                      {suggestion.area}
+                    </p>
+                    <p className="mt-1 text-sm font-medium text-foreground/90">
+                      {suggestion.problem}
+                    </p>
+                    <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                      {suggestion.why}
+                    </p>
+                    <p className="mt-1.5 text-xs leading-relaxed text-foreground/85">
+                      <span className="font-medium">What to do:</span> {suggestion.recommendation}
+                    </p>
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-3 text-[11px] text-muted-foreground">
+                These are generated from the published analysis only. Judge scores, notes and
+                rankings stay private.
+              </p>
+            </section>
+          )}
         </div>
 
         <div className="flex flex-wrap gap-2">

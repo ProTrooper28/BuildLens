@@ -19,7 +19,8 @@ import type {
   PublishedResult,
   SubmissionStatus,
 } from "@/types/hackathon";
-import type { CriteriaSet, JudgeEvaluation } from "@/types/evaluation";
+import type { CriteriaSet, ImprovementSuggestion, JudgeEvaluation } from "@/types/evaluation";
+import { buildImprovementSuggestions } from "@/services/inspection/copilot";
 import { awardedTotal, criterionTargets } from "@/lib/evaluation/scoring";
 import {
   findHackathonByCode,
@@ -295,6 +296,11 @@ export interface CandidateStatus {
   steps: SubmissionStep[];
   /** Only present once a judge has published it. */
   result: PublishedResult | null;
+  /**
+   * Candidate-safe improvements derived from the published analysis.
+   * Never judge notes, scores or rankings — only what to fix and why.
+   */
+  suggestions: ImprovementSuggestion[];
 }
 
 function stepStates(
@@ -460,6 +466,7 @@ export async function fetchCandidateStatus(
     checks: submissionChecks(row.submission, view, readiness),
     steps: stepStates(row.submission, view, readiness),
     result: row.submission.resultPublished ? row.submission.publishedResult : null,
+    suggestions: view ? buildImprovementSuggestions(view) : [],
   };
 }
 

@@ -7,6 +7,8 @@ import type {
   EvaluationRecordStatus,
   JudgeEvaluation,
   JudgeNote,
+  JudgeQuestion,
+  JudgeReview,
 } from "@/types/evaluation";
 import { getSupabase } from "@/lib/supabase";
 import { advanceSubmissionStatus } from "@/services/hackathon.service";
@@ -38,6 +40,10 @@ export interface EvaluationDraftInput {
   criteria: CriteriaSet;
   /** `in_progress` = saved draft, `evaluated` = submitted. */
   status: Exclude<EvaluationRecordStatus, "reviewed">;
+  /** Question state to persist; omitted = keep whatever is stored. */
+  questions?: JudgeQuestion[];
+  /** Structured review; omitted = keep, explicit null = clear. */
+  review?: JudgeReview | null;
 }
 
 /* ----------------------------------------------------------------- mapping */
@@ -52,6 +58,8 @@ interface EvaluationRow {
   recommendation: EvaluationRecommendation;
   scores: unknown;
   criteria_snapshot: unknown;
+  questions?: unknown;
+  review?: unknown;
   created_at: string;
   updated_at: string;
   submitted_at: string | null;
@@ -98,6 +106,45 @@ function toSnapshot(value: unknown): JudgeEvaluation["criteriaSnapshot"] {
   return { maxScore, criteria };
 }
 
+/** Questions survive a round-trip through jsonb without losing their state. */
+function toQuestions(value: unknown): JudgeQuestion[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+    .map((item): JudgeQuestion => ({
+      id: String(item["id"] ?? ""),
+      category: (item["category"] ?? "technical") as JudgeQuestion["category"],
+      question: String(item["question"] ?? ""),
+      why: String(item["why"] ?? ""),
+      evidence: String(item["evidence"] ?? ""),
+      priority: (item["priority"] ?? "medium") as JudgeQuestion["priority"],
+      source: item["source"] === "judge" ? "judge" : "evidence",
+      status:
+        item["status"] === "asked" || item["status"] === "answered" ? item["status"] : "pending",
+      note: typeof item["note"] === "string" ? item["note"] : null,
+    }))
+    .filter((question) => question.id !== "" && question.question.trim() !== "");
+}
+
+function toReview(value: unknown): JudgeReview | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const list = (input: unknown): string[] =>
+    Array.isArray(input) ? input.filter((item): item is string => typeof item === "string") : [];
+  return {
+    assessment: typeof record["assessment"] === "string" ? record["assessment"] : "",
+    strengths: list(record["strengths"]),
+    weaknesses: list(record["weaknesses"]),
+    suggestions: list(record["suggestions"]),
+    concerns: list(record["concerns"]),
+    recommendation:
+      typeof record["recommendation"] === "string"
+        ? (record["recommendation"] as JudgeReview["recommendation"])
+        : null,
+    updatedAt: typeof record["updatedAt"] === "string" ? record["updatedAt"] : "",
+  };
+}
+
 function toRecord(row: EvaluationRow, note: JudgeNote | null): JudgeEvaluation {
   return {
     id: row.id,
@@ -108,6 +155,8 @@ function toRecord(row: EvaluationRow, note: JudgeNote | null): JudgeEvaluation {
     status: row.status,
     scores: toScores(row.scores),
     notes: note,
+    questions: toQuestions(row.questions),
+    review: toReview(row.review),
     recommendation: row.recommendation ?? null,
     criteriaSnapshot: toSnapshot(row.criteria_snapshot),
     createdAt: row.created_at,
@@ -129,11 +178,11 @@ export async function listEvaluations(
     canUseRemote(judgeId),
     async () => {
       const supabase = getSupabase();
+      // `*` rather than a column list: the copilot columns arrive with migration
+      // 0011, and a database that has not applied it yet must still read.
       const evaluations = await supabase
         .from("judge_evaluations")
-        .select(
-          "id, submission_id, submission_category, judge_id, judge_name, status, recommendation, scores, criteria_snapshot, created_at, updated_at, submitted_at",
-        )
+        .select("*")
         .eq("submission_category", category);
       if (evaluations.error) throw evaluations.error;
 
@@ -211,6 +260,8 @@ export async function saveEvaluation(input: EvaluationDraftInput): Promise<Judge
               updatedAt: now,
             }
           : null,
+      questions: input.questions ?? previous?.questions ?? [],
+      review: input.review === undefined ? (previous?.review ?? null) : input.review,
       recommendation: input.recommendation,
       criteriaSnapshot: snapshot,
       createdAt: previous?.createdAt ?? now,
@@ -246,6 +297,10 @@ export async function saveEvaluation(input: EvaluationDraftInput): Promise<Judge
         recommendation: input.recommendation,
         scores: input.scores as unknown as Json,
         criteria_snapshot: snapshot as unknown as Json,
+        // Only written when supplied, so saving a score never clears the
+        // judge's questions and review.
+        ...(input.questions !== undefined ? { questions: input.questions as unknown as Json } : {}),
+        ...(input.review !== undefined ? { review: input.review as unknown as Json } : {}),
         updated_at: now,
         submitted_at: input.status === "evaluated" ? now : null,
       };

@@ -1,13 +1,15 @@
 import { createFileRoute, Link, useRouter } from "@tanstack/react-router";
-import { useEffect, useState, Suspense, type ReactNode } from "react";
+import { useEffect, useMemo, useState, Suspense, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import {
   AlertTriangle,
   CheckCircle2,
   Check,
   ChevronDown,
+  CircleHelp,
   ClipboardCheck,
   Copy,
+  Lightbulb,
   Download,
   FileCheck2,
   FileText,
@@ -44,6 +46,7 @@ import { PerformanceChart } from "@/components/Charts";
 import { getReportSummary, getReport, type ReportSummary } from "@/services/report.service";
 import { getGuestReport, type GuestReport } from "@/services/guest.service";
 import { isSupabaseConfigured } from "@/lib/supabase";
+import { buildImprovementSuggestions, buildJudgeQuestions } from "@/services/inspection/copilot";
 import { normalizeReportData, normalizeReportStatus, type RiskSeverity } from "@/lib/report-data";
 import {
   buildReportInsights,
@@ -386,6 +389,10 @@ function Report() {
   const status = normalizeReportStatus(reportRow?.status);
   const view = reportData ?? normalizeReportData(reportDataOf(reportRow));
   const insights = buildReportInsights(view);
+  /* Copilot output is derived from the same persisted view, so a refresh always
+     reproduces it and nothing is stored that the analysis did not observe. */
+  const judgeQuestions = useMemo(() => buildJudgeQuestions(view), [view]);
+  const suggestions = useMemo(() => buildImprovementSuggestions(view), [view]);
 
   useEffect(() => {
     if (!loaderRow) return;
@@ -1368,6 +1375,67 @@ function Report() {
                 </div>
               )}
             </ReportSection>
+
+            {/* 10b · Questions for the team (evidence-based) */}
+            {judgeQuestions.length > 0 && (
+              <ReportSection
+                value="questions"
+                title="Questions to ask"
+                icon={<CircleHelp className="h-4 w-4" />}
+                count={judgeQuestions.length}
+              >
+                <ul className="space-y-3">
+                  {judgeQuestions.map((question) => (
+                    <li key={question.id} className="rounded-lg border border-border/70 p-3">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <Badge variant="outline" className="text-[10px] uppercase">
+                          {question.priority}
+                        </Badge>
+                        <Badge variant="outline" className="text-[10px] text-muted-foreground">
+                          {question.category}
+                        </Badge>
+                      </div>
+                      <p className="mt-1.5 text-sm font-medium leading-relaxed">
+                        {question.question}
+                      </p>
+                      <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                        {question.why}
+                      </p>
+                      <p className="mt-1 text-[11px] text-muted-foreground">
+                        <span className="font-medium">Evidence:</span> {question.evidence}
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+              </ReportSection>
+            )}
+
+            {/* 10c · Candidate-safe improvement suggestions */}
+            {suggestions.length > 0 && (
+              <ReportSection
+                value="suggestions"
+                title="Improvement suggestions"
+                icon={<Lightbulb className="h-4 w-4" />}
+                count={suggestions.length}
+              >
+                <ul className="space-y-3">
+                  {suggestions.map((suggestion) => (
+                    <li key={suggestion.id} className="rounded-lg border border-border/70 p-3">
+                      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                        {suggestion.area}
+                      </p>
+                      <p className="mt-1 text-sm font-medium">{suggestion.problem}</p>
+                      <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                        {suggestion.why}
+                      </p>
+                      <p className="mt-1 text-xs leading-relaxed text-foreground/85">
+                        <span className="font-medium">What to do:</span> {suggestion.recommendation}
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+              </ReportSection>
+            )}
 
             {/* 11 · Pipeline (how the verdict was produced) */}
             <ReportSection
