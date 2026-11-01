@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { runProjectAnalysis, type AnalysisPersistence } from "@/analysis/analysis.service";
 import { ANALYSIS_STAGES, type AnalysisInput } from "@/analysis/types";
-import { computeScoreBreakdown, SCORE_WEIGHTS } from "@/analysis/score";
+import { computeScoreboard } from "@/analysis/score";
 import {
   createFetchMock,
   githubRepositoryRoutes,
@@ -58,57 +58,75 @@ function record(value: unknown, key?: string): Record<string, unknown> {
     : {};
 }
 
-describe("computeScoreBreakdown", () => {
-  it("renormalises weights around the dimensions that actually have evidence", () => {
-    const breakdown = computeScoreBreakdown({
+describe("computeScoreboard", () => {
+  it("scores the six categories and skips unmeasured ones", () => {
+    const board = computeScoreboard({
+      featureClaims: { supported: 3, partial: 1, total: 5 },
+      claimEvidenceScore: 60,
       codeQuality: 80,
-      security: 60,
       maintainability: 70,
       testing: 50,
-      documentation: 40,
+      security: 60,
       performance: null,
+      documentation: 40,
     });
 
-    // (80·.22 + 60·.22 + 70·.18 + 50·.16 + 40·.12) / .90 = 62.4 → 62
-    expect(breakdown.overall).toBe(62);
-    const performance = breakdown.dimensions.find((entry) => entry.key === "performance");
-    expect(performance?.score).toBeNull();
-    expect(performance?.contribution).toBeNull();
-    expect(performance?.rationale).toContain("Not enough evidence");
-    for (const dimension of breakdown.dimensions.filter((entry) => entry.key !== "performance")) {
-      expect(dimension.contribution).not.toBeNull();
-    }
-    expect(breakdown.baseWeights).toEqual(SCORE_WEIGHTS);
+    const points = (key: string) => board.categories.find((entry) => entry.key === key)?.points;
+    expect(board.categories).toHaveLength(6);
+    // (3 + 0.5·1) / 5 = 70% of the 25 functionality points → 17.5 → 18
+    expect(points("functionality")).toBe(18);
+    expect(points("claimAccuracy")).toBe(12);
+    // (80·.6 + 70·.2 + 50·.2) = 72 of the 15 code-quality points → 10.8 → 11
+    expect(points("codeQuality")).toBe(11);
+    expect(points("security")).toBe(9);
+    expect(points("documentation")).toBe(4);
+
+    // Runtime performance was never measured: no number, and no points counted.
+    const performance = board.categories.find((entry) => entry.key === "performance");
+    expect(performance?.points).toBeNull();
+    expect(performance?.measured).toBe(false);
+    expect(performance?.rationale).toContain("Not measured");
+
+    // 54 of 85 measurable points → 64/100
+    expect(board.points).toBe(54);
+    expect(board.measuredMax).toBe(85);
+    expect(board.overall).toBe(64);
   });
 
-  it("is deterministic and clamps out-of-range scores", () => {
-    const scores = {
+  it("is deterministic and clamps out-of-range inputs", () => {
+    const input = {
+      featureClaims: { supported: 1, partial: 0, total: 2 },
+      claimEvidenceScore: 140,
       codeQuality: 140,
-      security: -20,
-      maintainability: 70.4,
+      maintainability: -20,
       testing: 0,
-      documentation: 55,
+      security: -20,
       performance: 90,
+      documentation: 55,
     };
-    const first = computeScoreBreakdown(scores);
-    const second = computeScoreBreakdown(scores);
-    expect(first.overall).toBe(second.overall);
-    expect(first.dimensions.find((entry) => entry.key === "codeQuality")?.score).toBe(100);
-    expect(first.dimensions.find((entry) => entry.key === "security")?.score).toBe(0);
+    const first = computeScoreboard(input);
+    const second = computeScoreboard(input);
+    expect(first).toEqual(second);
+    const points = (key: string) => first.categories.find((entry) => entry.key === key)?.points;
+    expect(points("claimAccuracy")).toBe(20);
+    expect(points("security")).toBe(0);
     expect(first.overall).not.toBeNull();
   });
 
-  it("returns no overall score when every dimension is unknown", () => {
-    const breakdown = computeScoreBreakdown({
+  it("returns no overall score when nothing was measured", () => {
+    const board = computeScoreboard({
+      featureClaims: null,
+      claimEvidenceScore: null,
       codeQuality: null,
-      security: null,
       maintainability: null,
       testing: null,
-      documentation: null,
+      security: null,
       performance: null,
+      documentation: null,
     });
-    expect(breakdown.overall).toBeNull();
-    expect(breakdown.dimensions).toHaveLength(6);
+    expect(board.overall).toBeNull();
+    expect(board.categories).toHaveLength(6);
+    expect(board.measuredMax).toBe(0);
   });
 });
 
@@ -161,6 +179,21 @@ describe("runProjectAnalysis", () => {
     expect(scores["overall"]).toBe(result.score);
     expect(scores["performance"]).toBeNull();
     expect(typeof scores["codeQuality"]).toBe("number");
+
+    // The report's six-category breakdown explains that score.
+    const scoreboard = record(data["scoreboard"]);
+    expect(scoreboard["overall"]).toBe(result.score);
+    const categories = scoreboard["categories"] as { key: string; points: number | null }[];
+    expect(categories.map((entry) => entry.key)).toEqual([
+      "functionality",
+      "claimAccuracy",
+      "codeQuality",
+      "security",
+      "performance",
+      "documentation",
+    ]);
+    expect(categories.find((entry) => entry.key === "performance")?.points).toBeNull();
+    expect(typeof categories.find((entry) => entry.key === "codeQuality")?.points).toBe("number");
 
     const analysis = record(data["analysis"]);
     expect(analysis["state"]).toBe("completed");

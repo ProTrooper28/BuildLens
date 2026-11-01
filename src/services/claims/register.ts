@@ -326,7 +326,6 @@ export function registerClaims(input: RegisterClaimsInput): RegisteredClaims {
       deduped: extracted - merged.length,
       registered: claims.length,
       verified: decided,
-      deduction: claimScoreDeduction(claims),
       error,
       log,
     },
@@ -358,25 +357,6 @@ export const CLAIM_CATEGORY_IMPORTANCE: Record<NormalizedClaim["category"], numb
   impact: 0.4,
 };
 
-/** Points off the overall score at a full share of the claim set. */
-export const CLAIM_SCORE_PENALTY = {
-  unsupported: 20,
-  partial: 6,
-  could_not_verify: 3,
-} as const;
-
-function weightedShare(
-  claims: readonly NormalizedClaim[],
-  matches: (claim: NormalizedClaim) => boolean,
-): number {
-  const total = claims.reduce((sum, claim) => sum + CLAIM_CATEGORY_IMPORTANCE[claim.category], 0);
-  if (total === 0) return 0;
-  const part = claims
-    .filter(matches)
-    .reduce((sum, claim) => sum + CLAIM_CATEGORY_IMPORTANCE[claim.category], 0);
-  return part / total;
-}
-
 /**
  * Deterministic evidence score (0–100): how much of what the team claimed the
  * inspected evidence actually backs. `null` when there are no claims to score.
@@ -392,31 +372,6 @@ export function computeEvidenceScore(claims: readonly NormalizedClaim[]): number
     0,
   );
   return Math.max(0, Math.min(100, Math.round((backed / total) * 100)));
-}
-
-/**
- * Points the claim evidence pulls off the repository score, bounded so a claim
- * set can never erase the whole report: unsupported claims cost the most,
- * untested partials less, and "could not verify" almost nothing (a gap in the
- * evidence is not the team's failure).
- */
-export function claimScoreDeduction(claims: readonly NormalizedClaim[]): number {
-  if (claims.length === 0) return 0;
-  const unsupported = weightedShare(claims, (claim) => claim.verificationStatus === "unsupported");
-  const partial = weightedShare(claims, (claim) => claim.verificationStatus === "partial");
-  const unknown = weightedShare(
-    claims,
-    (claim) =>
-      claim.verificationStatus === "could_not_verify" || claim.verificationStatus === "unverified",
-  );
-  return -Math.min(
-    40,
-    Math.round(
-      unsupported * CLAIM_SCORE_PENALTY.unsupported +
-        partial * CLAIM_SCORE_PENALTY.partial +
-        unknown * CLAIM_SCORE_PENALTY.could_not_verify,
-    ),
-  );
 }
 
 /** Count helper re-exported for callers that only need the summary. */

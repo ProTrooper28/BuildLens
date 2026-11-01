@@ -35,12 +35,12 @@ import {
   analyzeMaintainability,
   type MaintainabilityAnalysis,
 } from "@/analysis/analyzers/maintainability.analyzer";
-import { computeScoreBreakdown, scoreBand, type DimensionKey } from "@/analysis/score";
+import { computeScoreboard, scoreBand, type Scoreboard } from "@/analysis/score";
 import { documentAnalysisPayloadOf } from "@/services/document";
 import {
-  claimScoreDeduction,
   computeEvidenceScore,
   countClaims,
+  featureClaimSupport,
   registerClaims,
   type NormalizedClaim,
   type RegisteredClaims,
@@ -101,7 +101,8 @@ interface PayloadContext {
   documentation: DocumentationAnalysis | null;
   maintainability: MaintainabilityAnalysis | null;
   score: number | null;
-  breakdown: ReturnType<typeof computeScoreBreakdown> | null;
+  /** Evidence-based six-category score breakdown (null until the score is computed). */
+  scoreboard: Scoreboard | null;
   /** Claims extracted + registered + verified so far (null until that stage runs). */
   registeredClaims: RegisteredClaims | null;
 }
@@ -143,7 +144,7 @@ function buildReportData(context: PayloadContext): Json {
     documentation,
     maintainability,
     score,
-    breakdown,
+    scoreboard,
     registeredClaims,
   } = context;
 
@@ -320,11 +321,14 @@ function buildReportData(context: PayloadContext): Json {
       testing: testing?.score ?? null,
       documentation: documentation?.score ?? null,
     },
-    score_breakdown: breakdown
+    // The report leads with this breakdown: six categories, each with the points
+    // it earned out of a fixed maximum, and never a number without evidence.
+    scoreboard: scoreboard
       ? {
-          overall: breakdown.overall,
-          dimensions: breakdown.dimensions,
-          base_weights: breakdown.baseWeights,
+          overall: scoreboard.overall,
+          points: scoreboard.points,
+          measuredMax: scoreboard.measuredMax,
+          categories: scoreboard.categories,
         }
       : null,
     evidence: {
@@ -432,7 +436,7 @@ export async function runProjectAnalysis({
   let documentation: DocumentationAnalysis | null = null;
   let maintainability: MaintainabilityAnalysis | null = null;
   let score: number | null = null;
-  let breakdown: ReturnType<typeof computeScoreBreakdown> | null = null;
+  let scoreboard: Scoreboard | null = null;
   let registeredClaims: RegisteredClaims | null = null;
 
   const emit = (state: "running" | "completed" | "failed", error: AnalysisErrorPayload | null) => {
@@ -452,7 +456,7 @@ export async function runProjectAnalysis({
       documentation,
       maintainability,
       score,
-      breakdown,
+      scoreboard,
       registeredClaims,
     });
     onStages?.(tracker.list);
@@ -565,31 +569,21 @@ export async function runProjectAnalysis({
     await emit("running", null);
 
     // 8. Scores + report
-    breakdown = computeScoreBreakdown(
-      {
-        codeQuality: quality.score,
-        security: security.score,
-        maintainability: maintainability.score,
-        testing: testing.score,
-        documentation: documentation.score,
-        performance: null,
-      } satisfies Record<DimensionKey, number | null>,
-      {
-        codeQuality: `${quality.summary}`,
-        security: `${security.summary}`,
-        maintainability: `${maintainability.summary}`,
-        testing: `${testing.summary}`,
-        documentation: `${documentation.summary}`,
-        performance: "Not enough evidence — no run-time performance measurement was performed.",
-      },
-    );
-    score =
-      breakdown.overall === null
-        ? null
-        : Math.max(
-            0,
-            Math.min(100, breakdown.overall + claimScoreDeduction(registeredClaims.claims)),
-          );
+    //    Claims feed two categories (functionality and claim accuracy), so an
+    //    unsupported claim lowers the score without a separate adjustment step.
+    scoreboard = computeScoreboard({
+      featureClaims: featureClaimSupport(registeredClaims.claims),
+      claimEvidenceScore: computeEvidenceScore(registeredClaims.claims),
+      codeQuality: quality.score,
+      security: security.score,
+      maintainability: maintainability.score,
+      testing: testing.score,
+      documentation: documentation.score,
+      // The repository analysis never executes the deployed site, so runtime
+      // performance stays unmeasured instead of being estimated.
+      performance: null,
+    });
+    score = scoreboard.overall;
     tracker.set(
       "report",
       "done",

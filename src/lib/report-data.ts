@@ -166,8 +166,6 @@ export interface ClaimPipeline {
   deduped: number;
   registered: number;
   verified: number;
-  /** Points the claim set pulls off the overall score (0 or negative). */
-  deduction: number;
   /** Set when claims were extracted but none reached registration. */
   error: string | null;
 }
@@ -213,6 +211,21 @@ export interface DocumentClaimsView {
   method: string | null;
 }
 
+/** `report_data.evidence` — what the analysis actually inspected. */
+export interface EvidenceSummaryView {
+  provider: string | null;
+  repository: string | null;
+  repositoryUrl: string | null;
+  defaultBranch: string | null;
+  license: string | null;
+  filesListed: number | null;
+  inspectedAt: string | null;
+  readmePath: string | null;
+  testFiles: number | null;
+  packageManager: string | null;
+  configFiles: string[];
+}
+
 /** `report_data.document_analysis` — claims extracted from the submitted deck. */
 export interface DocumentAnalysisView {
   status: string | null;
@@ -243,13 +256,23 @@ export interface ReportScoreSet {
   innovation: number | null;
 }
 
-export interface ScoreBreakdownEntry {
+/** One row of the report's score breakdown (six fixed categories). */
+export interface ScoreboardCategoryView {
   key: string;
   label: string;
-  weight: number;
-  score: number | null;
-  contribution: number | null;
+  /** Points earned, or null when the category had no evidence. */
+  points: number | null;
+  max: number;
+  measured: boolean;
   rationale: string;
+  evidence: string[];
+}
+
+export interface ScoreboardView {
+  overall: number | null;
+  points: number;
+  measuredMax: number;
+  categories: ScoreboardCategoryView[];
 }
 
 export interface ReportAnalysisStage {
@@ -336,11 +359,13 @@ export interface ReportView {
   claimCounts: ClaimCounts;
   claimPipeline: ClaimPipeline | null;
   documentAnalysis: DocumentAnalysisView | null;
+  evidence: EvidenceSummaryView | null;
   innovation: InnovationDetail | null;
   timeline: { time: string; event: string }[];
   interviewQuestions: string[];
   judgeQuestions: string[];
-  scoreBreakdown: { overall: number | null; dimensions: ScoreBreakdownEntry[] } | null;
+  /** The six-category score breakdown the report leads with (null on legacy payloads). */
+  scoreboard: ScoreboardView | null;
   analysis: ReportAnalysisMeta | null;
   /** Which required sections actually carried data in the payload. */
   present: Record<ReportSectionKey, boolean>;
@@ -552,7 +577,6 @@ function normalizeClaimPipeline(value: unknown): ClaimPipeline | null {
     deduped: num("deduped"),
     registered: num("registered"),
     verified: num("verified"),
-    deduction: num("deduction"),
     error: firstString(record["error"]),
   };
 }
@@ -612,6 +636,27 @@ function normalizeTimeline(value: unknown): { time: string; event: string }[] {
       return time && event ? { time, event } : null;
     })
     .filter((item): item is { time: string; event: string } => item !== null);
+}
+
+function normalizeEvidenceSummary(value: unknown): EvidenceSummaryView | null {
+  const record = asRecord(value);
+  if (Object.keys(record).length === 0) return null;
+  if (asString(record["repository"]) === null && asString(record["repository_url"]) === null) {
+    return null;
+  }
+  return {
+    provider: firstString(record["provider"]),
+    repository: firstString(record["repository"]),
+    repositoryUrl: firstString(record["repository_url"], record["repositoryUrl"]),
+    defaultBranch: firstString(record["default_branch"], record["defaultBranch"]),
+    license: firstString(record["license"]),
+    filesListed: asNumber(record["files_listed"] ?? record["filesListed"]),
+    inspectedAt: firstString(record["inspected_at"], record["inspectedAt"]),
+    readmePath: firstString(record["readme"]),
+    testFiles: asNumber(record["test_files"] ?? record["testFiles"]),
+    packageManager: firstString(record["package_manager"], record["packageManager"]),
+    configFiles: asStringArray(record["config_files"] ?? record["configFiles"]),
+  };
 }
 
 function normalizeRepository(value: unknown): RepositoryDetail | null {
@@ -685,26 +730,33 @@ function normalizeInnovation(value: unknown): InnovationDetail | null {
   };
 }
 
-function normalizeScoreBreakdown(
-  value: unknown,
-): { overall: number | null; dimensions: ScoreBreakdownEntry[] } | null {
+function normalizeScoreboard(value: unknown): ScoreboardView | null {
   const record = asRecord(value);
-  if (Object.keys(record).length === 0) return null;
-  const dimensions = asRecordArray(record["dimensions"])
-    .map((entry): ScoreBreakdownEntry | null => {
+  const categories = asRecordArray(record["categories"])
+    .map((entry): ScoreboardCategoryView | null => {
       const key = asString(entry["key"]);
       if (!key) return null;
+      const max = asNumber(entry["max"]);
+      if (max === null) return null;
+      const measured = asBoolean(entry["measured"]) ?? asNumber(entry["points"]) !== null;
       return {
         key,
         label: firstString(entry["label"]) ?? key,
-        weight: asNumber(entry["weight"]) ?? 0,
-        score: clampScore(asNumber(entry["score"])),
-        contribution: asNumber(entry["contribution"]),
-        rationale: firstString(entry["rationale"]) ?? "No rationale recorded.",
+        points: measured ? asNumber(entry["points"]) : null,
+        max,
+        measured,
+        rationale: firstString(entry["rationale"]) ?? "",
+        evidence: asStringArray(entry["evidence"]),
       };
     })
-    .filter((entry): entry is ScoreBreakdownEntry => entry !== null);
-  return { overall: clampScore(asNumber(record["overall"])), dimensions };
+    .filter((entry): entry is ScoreboardCategoryView => entry !== null);
+  if (categories.length === 0) return null;
+  return {
+    overall: clampScore(asNumber(record["overall"])),
+    points: asNumber(record["points"]) ?? 0,
+    measuredMax: asNumber(record["measuredMax"] ?? record["measured_max"]) ?? 0,
+    categories,
+  };
 }
 
 function normalizeAnalysis(value: unknown): ReportAnalysisMeta | null {
@@ -948,11 +1000,12 @@ export function normalizeReportData(raw: unknown): ReportView {
     claimCounts,
     claimPipeline,
     documentAnalysis: normalizeDocumentAnalysis(documentAnalysisRaw),
+    evidence: normalizeEvidenceSummary(data["evidence"] ?? data["evidence_summary"]),
     innovation,
     timeline: normalizeTimeline(data["timeline"]),
     interviewQuestions: asStringArray(data["interviewQuestions"] ?? data["interview_questions"]),
     judgeQuestions: asStringArray(data["judgeQuestions"] ?? data["judge_questions"]),
-    scoreBreakdown: normalizeScoreBreakdown(data["score_breakdown"] ?? data["scoreBreakdown"]),
+    scoreboard: normalizeScoreboard(data["scoreboard"]),
     analysis: normalizeAnalysis(data["analysis"]),
     present: {
       executiveSummary: executiveSummary !== null,
@@ -978,7 +1031,7 @@ export function normalizeReportData(raw: unknown): ReportView {
       risks: risks.length > 0 || securityFindings.length > 0,
       recommendations: recommendations.length > 0,
       documentAnalysis: normalizeDocumentAnalysis(documentAnalysisRaw) !== null,
-      overallScore: scores.overall !== null,
+      overallScore: scores.overall !== null || normalizeScoreboard(data["scoreboard"]) !== null,
     },
     hasPayloadData: Object.keys(data).length > 0,
   };

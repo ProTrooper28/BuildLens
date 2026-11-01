@@ -105,8 +105,6 @@ export interface ClaimPipelineStats {
   registered: number;
   /** Claims whose verification produced a decision (supported/partial/unsupported). */
   verified: number;
-  /** Points this claim set pulls off the overall score (0 or negative). */
-  deduction: number;
   /** Set when extraction found claims but registration kept none (pipeline bug). */
   error: string | null;
   log: string[];
@@ -120,7 +118,6 @@ export const EMPTY_CLAIM_STATS: ClaimPipelineStats = {
   deduped: 0,
   registered: 0,
   verified: 0,
-  deduction: 0,
   error: null,
   log: [],
 };
@@ -135,6 +132,25 @@ export function claimRegistrationError(extracted: number, registered: number): s
     return "Claims were extracted but were not registered for verification.";
   }
   return null;
+}
+
+/**
+ * Feature/workflow claims backed by evidence — the input to the report's
+ * Functionality category. `null` when the submission made no such claims, so the
+ * category is reported as unmeasured rather than guessed.
+ */
+export function featureClaimSupport(
+  claims: readonly NormalizedClaim[],
+): { supported: number; partial: number; total: number } | null {
+  const scoped = claims.filter(
+    (claim) => claim.category === "feature" || claim.category === "workflow",
+  );
+  if (scoped.length === 0) return null;
+  return {
+    supported: scoped.filter((claim) => claim.verificationStatus === "supported").length,
+    partial: scoped.filter((claim) => claim.verificationStatus === "partial").length,
+    total: scoped.length,
+  };
 }
 
 export function countClaims(claims: readonly NormalizedClaim[]): ClaimCounts {

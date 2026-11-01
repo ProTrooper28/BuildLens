@@ -13,12 +13,7 @@ import { describe, expect, it, vi } from "vitest";
 import { runProjectAnalysis, type AnalysisPersistence } from "@/analysis/analysis.service";
 import type { AnalysisInput } from "@/analysis/types";
 import { normalizeReportData } from "@/lib/report-data";
-import {
-  claimRegistrationError,
-  claimScoreDeduction,
-  computeEvidenceScore,
-  registerClaims,
-} from "@/services/claims";
+import { claimRegistrationError, computeEvidenceScore, registerClaims } from "@/services/claims";
 import type { DocumentAnalysis } from "@/services/document/types";
 import {
   createFetchMock,
@@ -272,20 +267,22 @@ describe("claim scoring", () => {
     expect(Number(evidence)).toBeLessThanOrEqual(100);
     expect(Number(evidence)).toBeLessThan(100);
 
-    // Claims that the evidence cannot back must lower the overall score…
-    const breakdown = payload(data["score_breakdown"]);
-    const repositoryScore = Number(breakdown["overall"]);
-    const stats = payload(data["claim_pipeline"]);
-    const deduction = Number(stats["deduction"]);
-    expect(deduction).toBeLessThan(0);
-    expect(run.score).toBe(repositoryScore + deduction);
-    expect(run.score as number).toBeLessThan(repositoryScore);
+    // The score is the six-category breakdown, and claims drive two of those
+    // categories — an unsupported claim lowers the number without a separate
+    // adjustment step.
+    const scoreboard = payload(data["scoreboard"]);
+    expect(scoreboard["overall"]).toBe(run.score);
+    const categories = scoreboard["categories"] as { key: string; points: number | null }[];
+    const points = (key: string) => categories.find((entry) => entry.key === key)?.points;
 
-    // …but bounded, so a claim set can never erase the whole report.
-    expect(deduction).toBeGreaterThanOrEqual(-40);
-    expect(claimScoreDeduction([])).toBe(0);
+    // Both claim categories are measured and short of their maximum here,
+    // because the deck and README claim more than the fixture repository shows.
+    expect(typeof points("functionality")).toBe("number");
+    expect(typeof points("claimAccuracy")).toBe("number");
+    expect(points("functionality") as number).toBeLessThan(25);
+    expect(points("claimAccuracy") as number).toBeLessThan(20);
 
-    // The registered claims are what produce such a number.
+    // Evidence score is a separate, claim-only figure the report shows.
     const claims = registerClaims({
       document: DECK,
       readme: { path: "README.md", text: README },
@@ -297,10 +294,7 @@ describe("claim scoring", () => {
         liveEvidence: [],
       },
     }).claims;
-    const directScore = computeEvidenceScore(claims);
-    expect(directScore).not.toBeNull();
-    expect(directScore as number).toBeGreaterThanOrEqual(0);
-    expect(claimScoreDeduction(claims)).toBeLessThan(0);
+    expect(computeEvidenceScore(claims)).not.toBeNull();
   });
 
   it("returns no evidence score when there are no claims", () => {
