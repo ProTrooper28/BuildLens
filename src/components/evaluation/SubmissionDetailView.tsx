@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { motion } from "framer-motion";
-import { ChevronLeft, ChevronRight, Loader2, XCircle } from "lucide-react";
+import { ChevronLeft, ChevronRight, Eye, EyeOff, Loader2, XCircle } from "lucide-react";
 
 import { AppLayout } from "@/components/layout/AppLayout";
 import { Button } from "@/components/ui/button";
@@ -10,6 +10,7 @@ import { ScoringPanel } from "@/components/evaluation/ScoringPanel";
 import { EvidencePanel } from "@/components/evaluation/EvidenceSection";
 import { JudgeSummary } from "@/components/evaluation/JudgeSummary";
 import { buildInspectionReport } from "@/services/inspection";
+import { setPublishedResult } from "@/services/hackathon.service";
 import {
   AiVerdictPanel,
   deriveVerdictFromSubmission,
@@ -185,6 +186,12 @@ function SubmissionDetailView({
   );
   const [dirty, setDirty] = useState(false);
 
+  // Published result — the only number a candidate may see.
+  const shared = detail.category === "project" ? (detail.sharedSubmission ?? null) : null;
+  const [published, setPublished] = useState(shared?.resultPublished ?? false);
+  const [publishedResult, setPublishedResultState] = useState(shared?.publishedResult ?? null);
+  const [publishing, setPublishing] = useState(false);
+
   const index = rows.findIndex((row) => row.submission.id === detail.id);
   const previous = index > 0 ? rows[index - 1] : undefined;
   const next = index >= 0 && index < rows.length - 1 ? rows[index + 1] : undefined;
@@ -264,6 +271,55 @@ function SubmissionDetailView({
    * submission); an already-submitted evaluation keeps its submitted state when it
    * is still complete, and falls back to a draft when criteria were cleared.
    */
+  /**
+   * Publish (or withdraw) the result the candidate sees.
+   *
+   * Only the numbers travel: total, maximum, percentage and rank. Judge notes,
+   * individual sheets and AI reasoning stay in the judging tables.
+   */
+  const handlePublish = async () => {
+    if (!shared || publishing) return;
+    setPublishing(true);
+    try {
+      const next = !published;
+      const percent =
+        criteriaSet.maxScore > 0 ? Math.round((total / criteriaSet.maxScore) * 1000) / 10 : 0;
+      const updated = await setPublishedResult(
+        detail.id.slice("project:".length),
+        judge.id,
+        next
+          ? {
+              total: Math.round(total * 10) / 10,
+              maxScore: criteriaSet.maxScore,
+              percent,
+              rank: rows.find((row) => row.submission.id === detail.id)?.rank ?? null,
+            }
+          : null,
+      );
+      if (!updated) throw new Error("The result was not saved.");
+      setPublished(updated.resultPublished);
+      setPublishedResultState(
+        updated.publishedResult
+          ? {
+              total: updated.publishedResult.total,
+              maxScore: updated.publishedResult.maxScore,
+              rank: updated.publishedResult.rank,
+            }
+          : null,
+      );
+      notify.success(
+        next ? "Result published" : "Result withdrawn",
+        next
+          ? "The candidate can now see their published result."
+          : "The candidate sees the submission status only.",
+      );
+    } catch {
+      notify.error("Couldn't update the published result", "Your scores are safe — try again.");
+    } finally {
+      setPublishing(false);
+    }
+  };
+
   const handleNavigate = async (direction: "prev" | "next") => {
     const target = direction === "prev" ? previous : next;
     if (!target) return;
@@ -363,6 +419,48 @@ function SubmissionDetailView({
                 starting={evidence.starting}
                 onStart={evidence.start}
               />
+              {shared && (
+                <section
+                  aria-label="Publish result"
+                  className="surface flex flex-wrap items-center gap-3 p-4"
+                >
+                  <span
+                    className={cn(
+                      "grid h-9 w-9 shrink-0 place-items-center rounded-lg",
+                      published
+                        ? "bg-success/10 text-success"
+                        : "bg-muted/60 text-muted-foreground",
+                    )}
+                    aria-hidden
+                  >
+                    {published ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium">
+                      {published ? "Result published to the candidate" : "Result not published"}
+                    </p>
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      {published
+                        ? `${publishedResult?.total ?? Math.round(total)} / ${publishedResult?.maxScore ?? criteriaSet.maxScore}${
+                            publishedResult?.rank ? ` · Rank #${publishedResult.rank}` : ""
+                          }`
+                        : `The team sees the submission status only. ${shared.hackathonName} judges keep scores and notes private.`}
+                    </p>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant={published ? "outline" : "default"}
+                    disabled={!complete || publishing}
+                    title={
+                      complete ? undefined : "Score every criterion before publishing a result"
+                    }
+                    onClick={() => void handlePublish()}
+                  >
+                    {publishing && <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />}
+                    {published ? "Withdraw result" : "Publish result"}
+                  </Button>
+                </section>
+              )}
               <SubmissionPreview detail={detail} />
             </>
           ) : (
@@ -419,10 +517,17 @@ function SubmissionDetailView({
         </div>
       </motion.div>
 
-      {/* AI verdict full panel — below the two-column grid */}
-      <div className="mt-6 pb-6">
-        <AiVerdictPanel verdict={aiVerdict} />
-      </div>
+      {/*
+       * The field-derived assessment is the fallback for a submission with no
+       * inspection yet (and for resumes). Once a project report exists, its AI
+       * section is the grounded one — showing both would hand the judge two AI
+       * summaries with different origins.
+       */}
+      {!inspectionReport && (
+        <div className="mt-6 pb-6">
+          <AiVerdictPanel verdict={aiVerdict} />
+        </div>
+      )}
 
       {/* Mobile quick bar: keep the running total and the way forward in reach. */}
       <div

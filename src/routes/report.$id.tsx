@@ -1,79 +1,58 @@
 import { createFileRoute, Link, useRouter } from "@tanstack/react-router";
-import { useEffect, useState, useMemo, lazy, Suspense } from "react";
+import { useEffect, useState, Suspense, type ReactNode } from "react";
 import { flushSync } from "react-dom";
-import { motion } from "framer-motion";
 import {
   AlertTriangle,
-  Bot,
   CheckCircle2,
   Check,
-  CircuitBoard,
+  ChevronDown,
   ClipboardCheck,
   Copy,
   Download,
-  ExternalLink,
   FileCheck2,
   FileText,
   FileWarning,
   Gauge,
-  Gavel,
-  GitBranch,
   Github,
   Globe,
   Info,
   Layers,
-  Lightbulb,
   ListChecks,
   Loader2,
-  MessagesSquare,
   Plus,
   RefreshCw,
   ShieldCheck,
   TrendingUp,
-  Wrench,
   XCircle,
 } from "lucide-react";
-import {
-  ResponsiveContainer,
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  Tooltip as RechartsTooltip,
-  LineChart,
-  Line,
-  CartesianGrid,
-} from "recharts";
 import { Accordion } from "@radix-ui/react-accordion";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Skeleton } from "@/components/ui/skeleton";
 import { Progress } from "@/components/ui/progress";
-import { Separator } from "@/components/ui/separator";
 import { AppLayout } from "@/components/layout/AppLayout";
 import { BrandMark } from "@/components/brand/BrandLogo";
-import { ScoreRing, scoreTone } from "@/components/ScoreRing";
+import { ScoreRing } from "@/components/ScoreRing";
 import { ReportSection } from "@/components/report/ReportSection";
 import { ErrorState } from "@/components/state/ErrorState";
 import {
   AmbientCard,
   EvaluationPipeline,
   LoadingState,
-  StaggerContainer,
-  StaggerItem,
   type PipelineStage,
 } from "@/components/motion/primitives";
-import { PerformanceChart, RepositoryChart } from "@/components/Charts";
+import { PerformanceChart } from "@/components/Charts";
 import { getReportSummary, getReport, type ReportSummary } from "@/services/report.service";
 import { getGuestReport, type GuestReport } from "@/services/guest.service";
 import { isSupabaseConfigured } from "@/lib/supabase";
+import { normalizeReportData, normalizeReportStatus, type RiskSeverity } from "@/lib/report-data";
 import {
-  normalizeReportData,
-  normalizeReportStatus,
-  type DocumentClaimsView,
-  type ReportView,
-  type RiskSeverity,
-} from "@/lib/report-data";
+  buildReportInsights,
+  type ClaimResult,
+  type FindingTone,
+  type MetricStatus,
+  type RepositoryCheck,
+  type VerdictTone,
+} from "@/lib/report-insights";
 import { useAuth } from "@/hooks/useAuth";
 import type { Report as ReportRow } from "@/types/database";
 import { notify } from "@/lib/toast-messages";
@@ -84,7 +63,6 @@ import {
   downloadReportFile,
   reportExportFilename,
 } from "@/lib/report-share";
-import { AiVerdictPanel, deriveVerdictFromReport } from "@/components/evaluation/AiVerdictPanel";
 
 interface ReportLoaderData {
   row: ReportSummary | null;
@@ -120,7 +98,7 @@ export const Route = createFileRoute("/report/$id")({
     try {
       // Summary only: the initial request deliberately excludes the large
       // `report_data` JSON so the page shell can paint instantly. The full
-      // analyst payload is fetched on demand (see `loadReportData` below).
+      // analyst payload is fetched on demand (see below).
       return { row: await getReportSummary(params.id), error: null };
     } catch (error) {
       console.error(error);
@@ -140,86 +118,39 @@ function formatDate(value: string | undefined): string {
   return date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 }
 
-const listIcon = "mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-primary";
+/** Detail sections the page opens by default (the summary is not collapsible). */
+const DEFAULT_OPEN_SECTIONS: string[] = [];
 
-/** Sections the page opens by default. */
-const DEFAULT_OPEN_SECTIONS = ["verdict", "summary", "overview", "risks", "recommendations"];
-
-/** Every report section, expanded for printing so nothing is cut off. */
+/** Every collapsible section, expanded for printing so nothing is cut off. */
 const ALL_SECTIONS = [
-  "verdict",
-  "summary",
-  "overview",
-  "architecture",
-  "code",
-  "security",
+  "functionality",
+  "deployment",
   "performance",
-  "maintainability",
+  "security",
+  "code",
   "documentation",
-  "testing",
-  "risks",
-  "recommendations",
-  "scores",
-  "repo",
-  "website",
-  "document",
-  "claims",
-  "innovation",
-  "interview",
-  "judge",
-  "timeline",
+  "evidence",
+  "pipeline",
 ];
 
-function BulletList({ items, icon }: { items: string[]; icon?: "check" | "cross" }) {
-  return (
-    <ul className="space-y-2.5">
-      {items.map((item, k) => (
-        <motion.li
-          key={`${item}-${k}`}
-          initial={{ opacity: 0, x: -4 }}
-          animate={{ opacity: 1, x: 0 }}
-          transition={{ delay: k * 0.04 }}
-          className="flex gap-2.5 text-sm text-muted-foreground"
-        >
-          {icon === "check" ? (
-            <Check className="mt-0.5 h-4 w-4 shrink-0 text-success" />
-          ) : icon === "cross" ? (
-            <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
-          ) : (
-            <span className={listIcon} />
-          )}
-          {item}
-        </motion.li>
-      ))}
-    </ul>
-  );
-}
+const listIcon = "mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-primary";
 
-function EmptyNote({ children }: { children?: string }) {
-  return (
-    <p className="rounded-lg border border-dashed border-border bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
-      {children ?? "No data was captured for this section yet."}
-    </p>
-  );
-}
+/* ------------------------------------------------------------- presentation */
 
-function ScoreStat({ label, score }: { label: string; score: number | null }) {
-  return (
-    <div className="rounded-lg border border-border bg-muted/30 p-4">
-      <p className="text-xs capitalize text-muted-foreground">{label}</p>
-      <p
-        className={`mt-1 text-2xl font-semibold tabular-nums ${
-          score === null ? "text-muted-foreground" : scoreTone(score)
-        }`}
-      >
-        {score ?? "—"}
-      </p>
-      <Progress value={score ?? 0} className="mt-2 h-1" aria-label={`${label} score`} />
-    </div>
-  );
-}
+const VERDICT_TONE: Record<VerdictTone, string> = {
+  verified: "border-success/40 bg-success/10 text-success",
+  partial: "border-warning/40 bg-warning/10 text-warning",
+  unverified: "border-destructive/40 bg-destructive/10 text-destructive",
+  unknown: "border-border bg-muted/50 text-muted-foreground",
+};
 
-const severityClass: Record<RiskSeverity, string> = {
+const FINDING_TONE: Record<FindingTone, { label: string; dot: string; text: string }> = {
+  critical: { label: "Critical", dot: "bg-destructive", text: "text-destructive" },
+  important: { label: "Important", dot: "bg-warning", text: "text-warning" },
+  positive: { label: "Positive", dot: "bg-success", text: "text-success" },
+};
+
+const SEVERITY_BADGE: Record<RiskSeverity, string> = {
   critical: "border-destructive/40 bg-destructive/10 text-destructive",
   high: "border-destructive/30 bg-destructive/10 text-destructive",
   medium: "border-warning/30 bg-warning/10 text-warning",
@@ -227,62 +158,185 @@ const severityClass: Record<RiskSeverity, string> = {
   unknown: "border-border bg-muted/50 text-muted-foreground",
 };
 
-function SeverityBadge({ severity }: { severity: RiskSeverity }) {
+const REPOSITORY_MARK: Record<
+  RepositoryCheck,
+  { glyph: string; label: string; className: string }
+> = {
+  verified: { glyph: "✓", label: "Found in repository", className: "text-success" },
+  partial: { glyph: "◐", label: "Partially found in repository", className: "text-warning" },
+  not_found: { glyph: "✕", label: "Not found in repository", className: "text-destructive" },
+  unverified: { glyph: "?", label: "Not checked", className: "text-muted-foreground" },
+};
+
+const METRIC_STATUS: Record<MetricStatus, { dot: string; label: string; className: string }> = {
+  good: { dot: "bg-success", label: "Good", className: "text-success" },
+  needs_improvement: {
+    dot: "bg-warning",
+    label: "Needs improvement",
+    className: "text-warning",
+  },
+  poor: { dot: "bg-destructive", label: "Poor", className: "text-destructive" },
+  not_measured: {
+    dot: "bg-muted-foreground/50",
+    label: "Not measured",
+    className: "text-muted-foreground",
+  },
+};
+
+const DOC_STATE: Record<"present" | "partial" | "missing", { glyph: string; className: string }> = {
+  present: { glyph: "✓", className: "text-success" },
+  partial: { glyph: "⚠", className: "text-warning" },
+  missing: { glyph: "✕", className: "text-destructive" },
+};
+
+function SectionHeading({ index, title, hint }: { index: string; title: string; hint?: string }) {
   return (
-    <Badge variant="outline" className={`text-xs capitalize ${severityClass[severity]}`}>
-      {severity}
-    </Badge>
+    <div className="flex flex-wrap items-baseline justify-between gap-2">
+      <h2 className="flex items-baseline gap-2 text-[13px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+        <span className="font-mono text-[11px] text-primary/70">{index}</span>
+        {title}
+      </h2>
+      {hint && <span className="text-xs text-muted-foreground">{hint}</span>}
+    </div>
   );
 }
 
-function scoreBand(score: number | null): { label: string; className: string } {
-  if (score === null) return { label: "Not scored yet", className: "text-muted-foreground" };
-  if (score >= 85) return { label: "Excellent", className: "text-success" };
-  if (score >= 70) return { label: "Strong submission", className: "text-success" };
-  if (score >= 55) return { label: "Needs improvement", className: "text-warning" };
-  return { label: "Significant gaps", className: "text-destructive" };
+function EmptyNote({ children }: { children?: string }) {
+  return (
+    <p className="rounded-lg border border-dashed border-border bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
+      {children ?? "No evidence was collected for this section."}
+    </p>
+  );
 }
 
-function scoreDimensions(view: ReportView): { label: string; score: number | null }[] {
-  return [
-    { label: "Overall", score: view.scores.overall },
-    { label: "Evidence", score: view.scores.evidence },
-    { label: "Code quality", score: view.scores.codeQuality },
-    { label: "Security", score: view.scores.security },
-    { label: "Performance", score: view.scores.performance },
-    { label: "Maintainability", score: view.scores.maintainability },
-    { label: "Testing", score: view.scores.testing },
-    { label: "Documentation", score: view.scores.documentation },
-    { label: "Innovation", score: view.scores.innovation },
-  ];
+function BulletList({ items, icon }: { items: string[]; icon?: "check" | "cross" }) {
+  return (
+    <ul className="space-y-2">
+      {items.map((item, k) => (
+        <li key={`${item}-${k}`} className="flex gap-2.5 text-sm text-muted-foreground">
+          {icon === "check" ? (
+            <Check className="mt-0.5 h-4 w-4 shrink-0 text-success" />
+          ) : icon === "cross" ? (
+            <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
+          ) : (
+            <span className={listIcon} />
+          )}
+          <span className="min-w-0">{item}</span>
+        </li>
+      ))}
+    </ul>
+  );
 }
 
-/** Claim categories extracted from the submitted document, in display order. */
-const DOCUMENT_CLAIM_GROUPS: {
-  key: Exclude<keyof DocumentClaimsView, "summary" | "method">;
+function StatRow({
+  label,
+  value,
+  tone = "neutral",
+  note,
+}: {
   label: string;
-}[] = [
-  { key: "problem", label: "Problem being solved" },
-  { key: "solution", label: "Proposed solution" },
-  { key: "features", label: "Key features" },
-  { key: "technology", label: "Technology / AI used" },
-  { key: "impact", label: "Claimed impact & results" },
-];
+  value: ReactNode;
+  tone?: "good" | "warning" | "bad" | "neutral";
+  note?: string | null;
+}) {
+  const toneClass =
+    tone === "good"
+      ? "text-success"
+      : tone === "warning"
+        ? "text-warning"
+        : tone === "bad"
+          ? "text-destructive"
+          : "text-foreground";
+  return (
+    <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 border-b border-border/50 py-2 last:border-0">
+      <span className="text-sm text-muted-foreground">{label}</span>
+      <span className={`text-sm font-medium tabular-nums ${toneClass}`}>{value}</span>
+      {note && <span className="w-full text-xs text-muted-foreground">{note}</span>}
+    </div>
+  );
+}
 
-function documentStatusBadge(status: string | null): { label: string; className: string } {
-  if (status === "success") {
-    return { label: "Text extracted", className: "border-success/30 bg-success/10 text-success" };
-  }
-  if (status === "partial") {
-    return { label: "Partially read", className: "border-warning/30 bg-warning/10 text-warning" };
-  }
-  if (status === "failed") {
-    return {
-      label: "Could not be read",
-      className: "border-destructive/30 bg-destructive/10 text-destructive",
-    };
-  }
-  return { label: "Not analysed", className: "border-border bg-muted/50 text-muted-foreground" };
+/** One claim in the verification table: verdict up top, evidence when opened. */
+function ClaimTableRow({ result }: { result: ClaimResult }) {
+  const { claim, verdict, repository } = result;
+  const mark = REPOSITORY_MARK[repository];
+  const sources = claim.sources?.length
+    ? claim.sources
+    : claim.source
+      ? [{ source: claim.source, location: claim.sourceLocation ?? null }]
+      : [];
+
+  return (
+    <li className="border-b border-border/50 last:border-0">
+      <details className="group">
+        <summary className="grid cursor-pointer list-none items-center gap-x-4 gap-y-1 px-1 py-3 transition-colors hover:bg-muted/20 md:grid-cols-[minmax(0,1fr)_6.5rem_6rem_6rem_8rem] [&::-webkit-details-marker]:hidden">
+          <span className="flex min-w-0 items-start gap-2 text-sm font-medium leading-snug">
+            <ChevronDown className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
+            <span className="min-w-0">{claim.claim}</span>
+          </span>
+          <span className="pl-5 text-xs text-muted-foreground md:pl-0">
+            <span className="md:hidden">Source: </span>
+            {result.sourceLabel}
+          </span>
+          <span className={`pl-5 text-sm md:pl-0 ${mark.className}`} title={mark.label}>
+            <span className="md:hidden">Repository: </span>
+            <span aria-hidden>{mark.glyph}</span>
+            <span className="sr-only">{mark.label}</span>
+          </span>
+          <span
+            className="pl-5 text-sm text-muted-foreground md:pl-0"
+            title="The deployed application was not executed by this analysis."
+          >
+            <span className="md:hidden">Deployment: not tested</span>
+            <span aria-hidden className="hidden md:inline">
+              —
+            </span>
+            <span className="sr-only">Not tested on the deployment</span>
+          </span>
+          <span className="pl-5 md:pl-0">
+            <Badge variant="outline" className={`text-[11px] ${VERDICT_TONE[verdict.tone]}`}>
+              {verdict.label}
+            </Badge>
+          </span>
+        </summary>
+        <dl className="space-y-2 border-t border-border/40 bg-muted/10 px-1 py-3 text-xs md:ml-5">
+          <div className="flex flex-col gap-0.5 sm:flex-row sm:gap-3">
+            <dt className="w-40 shrink-0 text-muted-foreground">Sources</dt>
+            <dd className="text-foreground/90">
+              {sources.length === 0
+                ? "Submission"
+                : sources
+                    .map((source) =>
+                      source.location ? `${source.source} — ${source.location}` : source.source,
+                    )
+                    .join(" · ")}
+            </dd>
+          </div>
+          <div className="flex flex-col gap-0.5 sm:flex-row sm:gap-3">
+            <dt className="w-40 shrink-0 text-muted-foreground">Repository evidence</dt>
+            <dd className="text-foreground/90">
+              {claim.evidence ?? "No repository evidence was recorded for this claim."}
+            </dd>
+          </div>
+          <div className="flex flex-col gap-0.5 sm:flex-row sm:gap-3">
+            <dt className="w-40 shrink-0 text-muted-foreground">Deployment evidence</dt>
+            <dd className="text-foreground/90">
+              Not tested — this analysis inspects the repository and submitted documents, it does
+              not click through the deployed application.
+            </dd>
+          </div>
+          <div className="flex flex-col gap-0.5 sm:flex-row sm:gap-3">
+            <dt className="w-40 shrink-0 text-muted-foreground">Result</dt>
+            <dd className="text-foreground/90">{verdict.label}</dd>
+          </div>
+          <div className="flex flex-col gap-0.5 sm:flex-row sm:gap-3">
+            <dt className="w-40 shrink-0 text-muted-foreground">Reason</dt>
+            <dd className="text-foreground/90">{claim.reason ?? "No reason was recorded."}</dd>
+          </div>
+        </dl>
+      </details>
+    </li>
+  );
 }
 
 function ReportState({
@@ -292,7 +346,7 @@ function ReportState({
 }: {
   title: string;
   subtitle: string;
-  children: React.ReactNode;
+  children: ReactNode;
 }) {
   return (
     <AppLayout title={title} subtitle={subtitle} crumbs={[{ label: "Reports", to: "/reports" }]}>
@@ -300,6 +354,8 @@ function ReportState({
     </AppLayout>
   );
 }
+
+/* -------------------------------------------------------------------- page */
 
 function Report() {
   const { row: loaderRow, error: loaderError } = Route.useLoaderData();
@@ -318,27 +374,19 @@ function Report() {
     setGuestResolved(true);
   }, [loaderRow, id]);
 
-  // The loader returns a summary (fast, no report_data). The full analyst
-  // payload is fetched lazily after first paint so the UI can show the shell
-  // immediately and only render the detailed sections once the data arrives.
-  const [reportData, setReportData] = useState<ReportView | null>(null);
+  const [reportData, setReportData] = useState<ReturnType<typeof normalizeReportData> | null>(null);
   const [fullRow, setFullRow] = useState<ReportRow | null>(null);
   // A summary row means the payload fetch is about to start — render skeletons
   // from the first paint instead of flashing empty sections.
   const [dataLoading, setDataLoading] = useState(loaderRow !== null);
 
-  // Prefer the full row (loaded lazily) so the detailed view has the real
-  // report_data payload. The summary (id, name, status, score, dates) is still
-  // available immediately for the shell.
   const reportRow: ReportSummary | ReportRow | GuestReport | null =
     fullRow ?? loaderRow ?? guestRow;
 
   const status = normalizeReportStatus(reportRow?.status);
   const view = reportData ?? normalizeReportData(reportDataOf(reportRow));
-  const aiVerdict = useMemo(() => deriveVerdictFromReport(view), [view]);
+  const insights = buildReportInsights(view);
 
-  // Fetch the full report (with report_data) after the summary shell renders.
-  // Guest rows already carry their payload, so only summary rows hit the network.
   useEffect(() => {
     if (!loaderRow) return;
     let cancelled = false;
@@ -405,13 +453,6 @@ function Report() {
     }
   };
 
-  /**
-   * Export the report as a standalone, printable HTML document.
-   *
-   * Uses only the already-normalised report data, so a malformed or empty
-   * payload produces a document that says the section is empty — never invented
-   * findings — and a failure here cannot crash the page.
-   */
   const downloadReport = async () => {
     if (exporting || !reportRow) return;
     setExporting(true);
@@ -514,18 +555,17 @@ function Report() {
   }
 
   const overall =
-    view.scores.overall ??
+    insights.finalVerdict.score ??
     (typeof reportRow.score === "number" && Number.isFinite(reportRow.score)
       ? Math.round(reportRow.score)
-      : null);
-  const band = scoreBand(overall);
-  const verifiedClaims = view.claims.filter((c) => c.verified).length;
-  const dimensions = scoreDimensions({ ...view, scores: { ...view.scores, overall } });
-  const scoredDimensions = dimensions.filter((d) => d.score !== null);
-  const findings = view.risks.length > 0 ? view.risks : view.security.findings;
+      : view.scores.overall);
 
-  // Pipeline states come from what the report actually contains — never faked.
+  const claimPipeline = view.claimPipeline;
+  const claimCounts = insights.claimCounts;
   const running = status.kind === "in_progress";
+  const claimStageState = (done: boolean): PipelineStage["state"] =>
+    done ? "done" : running ? "active" : claimPipeline?.error ? "error" : "pending";
+
   const pipelineStages: PipelineStage[] = [
     {
       label: "Evidence gathered",
@@ -534,24 +574,38 @@ function Report() {
         view.hasPayloadData || view.claims.length > 0 ? "done" : running ? "active" : "pending",
     },
     {
+      label: "Documents processed",
+      icon: <FileText className="h-3.5 w-3.5" />,
+      detail: view.documentAnalysis
+        ? `${view.documentAnalysis.fileName ?? "Submitted document"} read`
+        : "No document attached",
+      state: view.documentAnalysis ? "done" : running ? "active" : "pending",
+    },
+    {
+      label: "Claims extracted",
+      icon: <ClipboardCheck className="h-3.5 w-3.5" />,
+      detail: claimPipeline
+        ? `${claimPipeline.extracted} extracted · ${claimPipeline.deduped} merged`
+        : `${claimCounts.total} claims`,
+      state: claimStageState(claimPipeline ? claimPipeline.extracted > 0 : claimCounts.total > 0),
+    },
+    {
+      label: "Claims verified",
+      icon: <ListChecks className="h-3.5 w-3.5" />,
+      detail: claimPipeline
+        ? `${claimPipeline.verified} of ${claimPipeline.registered} decided`
+        : `${claimCounts.supported + claimCounts.partial + claimCounts.unsupported} decided`,
+      state: claimStageState(claimPipeline ? claimPipeline.verified > 0 : claimCounts.total > 0),
+    },
+    {
       label: "Repository analyzed",
       icon: <Github className="h-3.5 w-3.5" />,
-      state:
-        view.repository || view.architecture.stack.length > 0
-          ? "done"
-          : running
-            ? "active"
-            : "pending",
+      state: view.repository || view.evidence?.repository ? "done" : running ? "active" : "pending",
     },
     {
       label: "Project evaluated",
       icon: <ListChecks className="h-3.5 w-3.5" />,
       state: view.hasPayloadData ? "done" : running ? "active" : "pending",
-    },
-    {
-      label: "AI scoring",
-      icon: <TrendingUp className="h-3.5 w-3.5" />,
-      state: scoredDimensions.length > 0 ? "done" : running ? "active" : "pending",
     },
     {
       label: "Report generated",
@@ -575,6 +629,9 @@ function Report() {
         : status.kind === "in_progress"
           ? "border-warning/30 bg-warning/5"
           : "border-border bg-muted/30";
+
+  const { performance, scoreboard, deployment, security, documentation, codeQuality } = insights;
+  const measuredMetrics = performance.filter((metric) => metric.status !== "not_measured");
 
   return (
     <AppLayout
@@ -613,8 +670,8 @@ function Report() {
         </div>
       }
     >
-      <div className="space-y-5">
-        {/* Status + data-source banner */}
+      <div className="space-y-6">
+        {/* Status banner */}
         <div
           className={`flex flex-wrap items-start gap-3 rounded-xl border px-4 py-3 ${statusEdge}`}
         >
@@ -643,7 +700,7 @@ function Report() {
                 {status.label}
               </Badge>
               <Badge variant="outline" className="text-xs">
-                {view.hasPayloadData ? "Live report data" : "Awaiting analysis data"}
+                {view.hasPayloadData ? "Report data" : "Awaiting analysis data"}
               </Badge>
             </div>
             <p className="mt-1 text-xs text-muted-foreground">{status.description}</p>
@@ -654,7 +711,7 @@ function Report() {
               </p>
             )}
           </div>
-          {status.kind === "in_progress" ? (
+          {running ? (
             <Button asChild variant="outline" size="sm" className="print:hidden">
               <Link
                 to="/progress"
@@ -670,965 +727,753 @@ function Report() {
           ) : null}
         </div>
 
-        {/* Hero score cards */}
-        <StaggerContainer className="grid gap-5 lg:grid-cols-3">
-          <StaggerItem>
-            <AmbientCard className="surface flex h-full items-center gap-6 p-6">
-              <ScoreRing value={overall} label="/ 100" />
-              <div className="min-w-0">
-                <p className="text-sm text-muted-foreground">Overall Score</p>
-                <p className={`mt-1 text-lg font-semibold ${band.className}`}>{band.label}</p>
-                <p className="mt-2 text-xs text-muted-foreground">
-                  {overall === null
-                    ? "No score stored for this report."
-                    : `Stored score · ${status.kind === "completed" ? "final" : "not final"}`}
-                </p>
-              </div>
-            </AmbientCard>
-          </StaggerItem>
-          <StaggerItem>
-            <AmbientCard className="surface flex h-full items-center gap-6 p-6">
-              <ScoreRing value={view.scores.evidence} label="/ 100" />
-              <div className="min-w-0">
-                <p className="text-sm text-muted-foreground">Evidence Score</p>
-                <p className="mt-1 text-lg font-semibold">
-                  {view.claims.length > 0
-                    ? `${verifiedClaims} of ${view.claims.length} claims verified`
-                    : "No claims recorded"}
-                </p>
-                <p className="mt-2 text-xs text-muted-foreground">
-                  {view.claims.length > 0
-                    ? `${view.claims.length - verifiedClaims} unverified — see Claim Verification`
-                    : "Claim verification runs with the analysis."}
-                </p>
-              </div>
-            </AmbientCard>
-          </StaggerItem>
-          <StaggerItem>
-            <AmbientCard className="surface space-y-4 p-6">
-              {view.metrics.length > 0 ? (
-                view.metrics.map((m) => (
-                  <div key={m.label}>
-                    <div className="mb-1.5 flex justify-between text-sm">
-                      <span>{m.label}</span>
-                      <span
-                        className={`font-mono ${m.score === null ? "text-muted-foreground" : scoreTone(m.score)}`}
-                      >
-                        {m.score ?? "—"}
-                      </span>
-                    </div>
-                    <Progress value={m.score ?? 0} className="h-1.5" />
-                  </div>
-                ))
-              ) : (
-                <EmptyNote>No per-metric scores were stored with this report.</EmptyNote>
-              )}
-            </AmbientCard>
-          </StaggerItem>
-        </StaggerContainer>
-
-        {/* Evidence pipeline */}
-        <EvaluationPipeline stages={pipelineStages} />
-
-        {/* Collapsible sections */}
-        {dataLoading && !view.hasPayloadData ? (
+        {dataLoading && !view.hasPayloadData && (
           <div className="surface p-6">
             <LoadingState label="Loading report analysis…" rows={6} />
           </div>
-        ) : (
+        )}
+
+        {/* ── LEVEL 1 · 1. EXECUTIVE SUMMARY ─────────────────────────────── */}
+        <AmbientCard className="surface overflow-hidden p-0">
+          <div className="grid gap-6 p-6 lg:grid-cols-[220px_minmax(0,1fr)] lg:gap-8">
+            <div className="flex items-center gap-5 lg:flex-col lg:items-start lg:border-r lg:border-border/60 lg:pr-6">
+              <ScoreRing value={overall} label="/ 100" />
+              <div className="min-w-0">
+                <p className="text-xs uppercase tracking-[0.16em] text-muted-foreground">
+                  Overall score
+                </p>
+                <p className="mt-1 font-mono text-2xl font-semibold tabular-nums">
+                  {overall === null ? "—" : overall}
+                  <span className="text-sm font-normal text-muted-foreground">/100</span>
+                </p>
+                {overall === null && (
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    No score stored for this report.
+                  </p>
+                )}
+                <p className="mt-3 text-xs uppercase tracking-[0.16em] text-muted-foreground">
+                  Verdict
+                </p>
+                <Badge
+                  variant="outline"
+                  className={`mt-1 text-[11px] font-semibold uppercase tracking-wide ${VERDICT_TONE[insights.verdict.tone]}`}
+                >
+                  {insights.verdict.label}
+                </Badge>
+              </div>
+            </div>
+
+            <div className="min-w-0">
+              <SectionHeading index="01" title="Executive summary" hint={status.label} />
+              <div className="mt-3 space-y-2">
+                {insights.summary.map((sentence, index) => (
+                  <p key={index} className="text-sm leading-relaxed text-foreground/90">
+                    {sentence}
+                  </p>
+                ))}
+              </div>
+
+              <p className="mt-5 text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                Most important findings
+              </p>
+              <ul className="mt-2 space-y-2">
+                {insights.findings.map((finding, index) => {
+                  const tone = FINDING_TONE[finding.tone];
+                  return (
+                    <li
+                      key={`${finding.title}-${index}`}
+                      className="flex items-start gap-3 rounded-lg border border-border/60 bg-muted/20 px-3 py-2"
+                    >
+                      <span className={`mt-2 h-2 w-2 shrink-0 rounded-full ${tone.dot}`} />
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium leading-snug">{finding.title}</p>
+                        <p className="mt-0.5 text-xs text-muted-foreground">
+                          <span className={`font-semibold uppercase tracking-wide ${tone.text}`}>
+                            {tone.label}
+                          </span>
+                          {finding.detail ? ` · ${finding.detail}` : ""}
+                        </p>
+                      </div>
+                    </li>
+                  );
+                })}
+                {insights.findings.length === 0 && (
+                  <li>
+                    <EmptyNote>No findings were recorded for this submission.</EmptyNote>
+                  </li>
+                )}
+              </ul>
+            </div>
+          </div>
+        </AmbientCard>
+
+        {/* ── LEVEL 1 · 2. SCORE BREAKDOWN ───────────────────────────────── */}
+        <section className="surface p-6">
+          <SectionHeading
+            index="02"
+            title="Score breakdown"
+            hint={`${scoreboard.points} of ${scoreboard.measuredMax} possible points`}
+          />
+          <ul className="mt-4 divide-y divide-border/50">
+            {scoreboard.categories.map((category) => {
+              const pct =
+                category.points === null ? 0 : Math.round((category.points / category.max) * 100);
+              return (
+                <li key={category.key}>
+                  <details className="group">
+                    <summary className="grid cursor-pointer list-none items-center gap-x-4 gap-y-1 py-2.5 [&::-webkit-details-marker]:hidden sm:grid-cols-[10rem_minmax(0,1fr)_5rem]">
+                      <span className="flex items-center gap-1.5 text-sm font-medium">
+                        <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
+                        {category.label}
+                      </span>
+                      <span className="flex items-center gap-3 pl-5 sm:pl-0">
+                        <Progress
+                          value={pct}
+                          className="h-1.5 flex-1"
+                          aria-label={`${category.label} score`}
+                        />
+                      </span>
+                      <span className="pl-5 text-right text-sm font-mono tabular-nums sm:pl-0">
+                        {category.points === null ? (
+                          <span className="text-xs text-muted-foreground">Not measured</span>
+                        ) : (
+                          <>
+                            <span className="font-semibold">{category.points}</span>
+                            <span className="text-muted-foreground">/{category.max}</span>
+                          </>
+                        )}
+                      </span>
+                    </summary>
+                    <div className="pb-3 pl-5 sm:pl-6">
+                      <p className="text-xs text-muted-foreground">{category.rationale}</p>
+                      {category.evidence.length > 0 && (
+                        <ul className="mt-1 space-y-0.5">
+                          {category.evidence.map((item) => (
+                            <li key={item} className="text-xs text-muted-foreground">
+                              · {item}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  </details>
+                </li>
+              );
+            })}
+          </ul>
+          {view.scoreboard === null && view.scores.overall !== null && (
+            <p className="mt-3 text-xs text-muted-foreground">
+              This report predates the six-category score, so its categories are recomputed from the
+              stored evidence while the overall score stays the one recorded with the report.
+            </p>
+          )}
+          <div className="mt-3 flex flex-wrap items-baseline justify-between gap-2 border-t border-border/60 pt-3">
+            <span className="text-sm font-semibold uppercase tracking-wide">Overall</span>
+            <span className="font-mono text-sm tabular-nums">
+              <span className="text-base font-semibold">{overall ?? "—"}</span>
+              <span className="text-muted-foreground">/100</span>
+              {scoreboard.measuredMax < 100 && (
+                <span className="ml-2 text-xs text-muted-foreground">
+                  ({scoreboard.measuredMax} of 100 points measurable)
+                </span>
+              )}
+            </span>
+          </div>
+        </section>
+
+        {/* ── LEVEL 1 · 3. CLAIM VERIFICATION ────────────────────────────── */}
+        <section className="surface p-6">
+          <SectionHeading
+            index="03"
+            title="Claim verification"
+            hint="Each claim opens to its evidence"
+          />
+          {claimPipeline?.error ? (
+            <p className="mt-3 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+              <strong>Pipeline error:</strong> {claimPipeline.error}
+            </p>
+          ) : claimCounts.total === 0 ? (
+            <div className="mt-3">
+              <EmptyNote>
+                No claims were extracted from the submitted deck, the README or the submission form,
+                so there was nothing to verify.
+              </EmptyNote>
+            </div>
+          ) : (
+            <>
+              <p className="mt-3 text-sm text-muted-foreground">
+                <span className="font-medium text-foreground">
+                  {claimCounts.total} claim{claimCounts.total === 1 ? "" : "s"} analyzed
+                </span>
+                {" · "}
+                <span className="text-success">✓ {claimCounts.supported} verified</span>
+                {" · "}
+                <span className="text-warning">⚠ {claimCounts.partial} partially verified</span>
+                {" · "}
+                <span className="text-destructive">✕ {claimCounts.unsupported} unsupported</span>
+                {claimCounts.could_not_verify > 0 && (
+                  <>
+                    {" · "}
+                    <span className="text-muted-foreground">
+                      ? {claimCounts.could_not_verify} could not be verified
+                    </span>
+                  </>
+                )}
+              </p>
+
+              <div className="mt-4">
+                <div className="hidden grid-cols-[minmax(0,1fr)_6.5rem_6rem_6rem_8rem] gap-x-4 border-b border-border/70 px-1 pb-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground md:grid">
+                  <span>Claim</span>
+                  <span>Source</span>
+                  <span>Repository</span>
+                  <span>Deployment</span>
+                  <span>Verdict</span>
+                </div>
+                <ul>
+                  {insights.claims.map((result, index) => (
+                    <ClaimTableRow key={`${result.claim.claim}-${index}`} result={result} />
+                  ))}
+                </ul>
+              </div>
+              <p className="mt-3 text-xs text-muted-foreground">
+                A statement in the PPT, the README or the submission form is a claim, never proof.
+                Repository evidence is a file-path and stack match; the deployed application was not
+                executed, so deployment checks are marked as not tested.
+                {claimPipeline && claimPipeline.deduped > 0
+                  ? ` ${claimPipeline.extracted} claims were extracted and ${claimPipeline.deduped} merged as duplicates.`
+                  : ""}
+              </p>
+            </>
+          )}
+        </section>
+
+        {/* ── LEVEL 2 · DETAILED SECTIONS ────────────────────────────────── */}
+        <div className="surface px-6">
           <Accordion
             type="multiple"
             value={openSections}
             onValueChange={setOpenSections}
-            className="surface px-6"
+            className="divide-y divide-border/60"
           >
+            {/* 04 · Functionality */}
             <ReportSection
-              value="verdict"
-              title="AI Verdict"
-              icon={<Bot className="h-4 w-4" />}
-              defaultOpen
-            >
-              <AiVerdictPanel verdict={aiVerdict} title="AI Analysis &amp; Pre-Assessment" />
-            </ReportSection>
-
-            <ReportSection
-              value="summary"
-              title="Executive Summary"
-              icon={<FileText className="h-4 w-4" />}
-              defaultOpen
-            >
-              {view.executiveSummary ? (
-                <p className="text-sm text-muted-foreground">{view.executiveSummary}</p>
-              ) : (
-                <EmptyNote />
-              )}
-            </ReportSection>
-
-            <ReportSection
-              value="overview"
-              title="Project Overview"
-              icon={<Info className="h-4 w-4" />}
-              defaultOpen
-            >
-              {view.overview.summary ? (
-                <p className="text-sm text-muted-foreground">{view.overview.summary}</p>
-              ) : (
-                <EmptyNote>No overview summary was stored with this report.</EmptyNote>
-              )}
-              {(view.overview.repoUrl || view.overview.websiteUrl) && (
-                <div className="mt-4 flex flex-wrap gap-4 text-sm">
-                  {view.overview.repoUrl && (
-                    <a
-                      href={view.overview.repoUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center gap-1.5 text-primary hover:underline"
-                    >
-                      <Github className="h-4 w-4" /> {view.overview.repoUrl}
-                      <ExternalLink className="h-3.5 w-3.5" />
-                    </a>
-                  )}
-                  {view.overview.websiteUrl && (
-                    <a
-                      href={view.overview.websiteUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center gap-1.5 text-primary hover:underline"
-                    >
-                      <Globe className="h-4 w-4" /> {view.overview.websiteUrl}
-                      <ExternalLink className="h-3.5 w-3.5" />
-                    </a>
-                  )}
-                </div>
-              )}
-              {view.overview.highlights.length > 0 && (
-                <div className="mt-5">
-                  <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                    Highlights
-                  </p>
-                  <BulletList items={view.overview.highlights} icon="check" />
-                </div>
-              )}
-            </ReportSection>
-
-            <ReportSection
-              value="architecture"
-              title="Architecture / Technology Stack"
-              icon={<Layers className="h-4 w-4" />}
-              count={view.architecture.stack.length || undefined}
-            >
-              {view.architecture.summary && (
-                <p className="text-sm text-muted-foreground">{view.architecture.summary}</p>
-              )}
-              {view.architecture.stack.length > 0 ? (
-                <div className="mt-4 flex flex-wrap gap-1.5">
-                  {view.architecture.stack.map((entry) => (
-                    <Badge
-                      key={entry.name}
-                      variant="secondary"
-                      className="text-xs"
-                      title={entry.detail ?? undefined}
-                    >
-                      {entry.name}
-                      {entry.detail ? ` · ${entry.detail}` : ""}
-                    </Badge>
-                  ))}
-                </div>
-              ) : (
-                !view.architecture.summary && <EmptyNote />
-              )}
-              {view.architecture.layers.length > 0 && (
-                <div className="mt-5 space-y-2">
-                  <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                    Layers
-                  </p>
-                  <ul className="space-y-2">
-                    {view.architecture.layers.map((layer) => (
-                      <li key={layer.name} className="text-sm text-muted-foreground">
-                        <strong className="text-foreground">{layer.name}:</strong>{" "}
-                        {layer.detail ?? "—"}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-              {view.architecture.decisions.length > 0 && (
-                <div className="mt-5">
-                  <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                    Key decisions
-                  </p>
-                  <BulletList items={view.architecture.decisions} />
-                </div>
-              )}
-            </ReportSection>
-
-            <ReportSection
-              value="code"
-              title="Code Quality"
+              value="functionality"
+              title="Functionality"
               icon={<ClipboardCheck className="h-4 w-4" />}
-              count={view.codeQuality.findings.length || undefined}
+              count={insights.features.length}
             >
-              <div className="flex flex-wrap items-center gap-4">
-                <div className="flex items-baseline gap-2">
-                  <span
-                    className={`text-3xl font-semibold tabular-nums ${
-                      view.scores.codeQuality === null
-                        ? "text-muted-foreground"
-                        : scoreTone(view.scores.codeQuality)
-                    }`}
-                  >
-                    {view.scores.codeQuality ?? "—"}
-                  </span>
-                  <span className="text-sm text-muted-foreground">/ 100</span>
-                </div>
-                {view.codeQuality.coveragePct !== null && (
-                  <Badge variant="outline" className="text-xs">
-                    Test coverage · {view.codeQuality.coveragePct}%
-                  </Badge>
-                )}
-              </div>
-              {view.codeQuality.summary && (
-                <p className="mt-3 text-sm text-muted-foreground">{view.codeQuality.summary}</p>
-              )}
-              {view.codeQuality.findings.length > 0 ? (
-                <div className="mt-4">
-                  <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                    Findings
-                  </p>
-                  <BulletList items={view.codeQuality.findings} icon="check" />
-                </div>
-              ) : view.codeQuality.notes.length > 0 ? (
-                <div className="mt-4">
-                  <BulletList items={view.codeQuality.notes} icon="check" />
-                </div>
-              ) : (
-                !view.codeQuality.summary && <EmptyNote />
-              )}
-            </ReportSection>
-
-            <ReportSection
-              value="security"
-              title="Security"
-              icon={<ShieldCheck className="h-4 w-4" />}
-              count={view.security.findings.length || undefined}
-              tone="warning"
-            >
-              {view.security.summary && (
-                <p className="text-sm text-muted-foreground">{view.security.summary}</p>
-              )}
-              {view.security.findings.length > 0 ? (
-                <ul className="mt-4 space-y-3">
-                  {view.security.findings.map((finding, i) => (
-                    <li key={`${finding.title}-${i}`} className="flex gap-3">
-                      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
-                      <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center gap-2 font-medium">
-                          {finding.title}
-                          <SeverityBadge severity={finding.severity} />
-                        </div>
-                        {finding.detail && (
-                          <p className="text-sm text-muted-foreground">{finding.detail}</p>
-                        )}
-                        {finding.mitigation && (
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            Fix: {finding.mitigation}
-                          </p>
-                        )}
-                      </div>
-                    </li>
-                  ))}
+              <p className="text-sm text-muted-foreground">
+                {insights.features.length === 0
+                  ? "No feature claims were submitted, so there was nothing to test."
+                  : `${insights.features.length} claimed feature${insights.features.length === 1 ? "" : "s"} were checked against the repository (file paths and detected stack). None were executed on the deployed application.`}
+              </p>
+              {insights.features.length > 0 && (
+                <ul className="mt-4 space-y-2">
+                  {insights.features.map((feature, index) => {
+                    const state =
+                      feature.verdict === "working"
+                        ? { glyph: "✓", className: "text-success" }
+                        : feature.verdict === "partial"
+                          ? { glyph: "⚠", className: "text-warning" }
+                          : feature.verdict === "not_found"
+                            ? { glyph: "✕", className: "text-destructive" }
+                            : { glyph: "?", className: "text-muted-foreground" };
+                    return (
+                      <li key={`${feature.claim}-${index}`}>
+                        <details className="group rounded-lg border border-border/70 bg-card/40">
+                          <summary className="flex cursor-pointer list-none items-start gap-3 px-3 py-2.5 [&::-webkit-details-marker]:hidden">
+                            <span
+                              className={`mt-0.5 text-sm font-semibold ${state.className}`}
+                              aria-hidden
+                            >
+                              {state.glyph}
+                            </span>
+                            <span className="min-w-0 flex-1 text-sm font-medium leading-snug">
+                              {feature.claim}
+                            </span>
+                            <span className="shrink-0 text-xs text-muted-foreground">
+                              {feature.verdictLabel}
+                            </span>
+                            <ChevronDown className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
+                          </summary>
+                          <dl className="space-y-2 border-t border-border/50 px-3 py-3 text-xs">
+                            <div className="flex flex-col gap-0.5 sm:flex-row sm:gap-3">
+                              <dt className="w-36 shrink-0 text-muted-foreground">Claim</dt>
+                              <dd className="text-foreground/90">{feature.expected}</dd>
+                            </div>
+                            <div className="flex flex-col gap-0.5 sm:flex-row sm:gap-3">
+                              <dt className="w-36 shrink-0 text-muted-foreground">
+                                What was tested
+                              </dt>
+                              <dd className="text-foreground/90">{feature.tested}</dd>
+                            </div>
+                            <div className="flex flex-col gap-0.5 sm:flex-row sm:gap-3">
+                              <dt className="w-36 shrink-0 text-muted-foreground">Observed</dt>
+                              <dd className="text-foreground/90">{feature.observed}</dd>
+                            </div>
+                            <div className="flex flex-col gap-0.5 sm:flex-row sm:gap-3">
+                              <dt className="w-36 shrink-0 text-muted-foreground">Verdict</dt>
+                              <dd className="text-foreground/90">{feature.verdictLabel}</dd>
+                            </div>
+                          </dl>
+                        </details>
+                      </li>
+                    );
+                  })}
                 </ul>
-              ) : (
-                !view.security.summary && <EmptyNote />
               )}
             </ReportSection>
 
+            {/* 05 · Deployment & runtime */}
+            <ReportSection
+              value="deployment"
+              title="Deployment & runtime"
+              icon={<Globe className="h-4 w-4" />}
+            >
+              <div>
+                {deployment.rows.map((row) => (
+                  <StatRow
+                    key={row.label}
+                    label={row.label}
+                    value={row.value}
+                    tone={row.tone === "bad" ? "bad" : row.tone}
+                  />
+                ))}
+              </div>
+              <p className="mt-3 text-xs text-muted-foreground">
+                The deployment is only reported when it was actually loaded. This analysis inspects
+                the repository and the submitted documents, so interaction tests, console errors and
+                broken-link checks stay unmeasured instead of being guessed.
+              </p>
+            </ReportSection>
+
+            {/* 06 · Performance */}
             <ReportSection
               value="performance"
               title="Performance"
               icon={<Gauge className="h-4 w-4" />}
             >
-              <div className="flex flex-wrap items-center gap-4">
-                <div className="flex items-baseline gap-2">
-                  <span
-                    className={`text-3xl font-semibold tabular-nums ${
-                      view.scores.performance === null
-                        ? "text-muted-foreground"
-                        : scoreTone(view.scores.performance)
-                    }`}
-                  >
-                    {view.scores.performance ?? "—"}
-                  </span>
-                  <span className="text-sm text-muted-foreground">/ 100</span>
-                </div>
-                {view.performance.pageWeightMb !== null && (
-                  <Badge variant="outline" className="text-xs">
-                    Page weight · {view.performance.pageWeightMb} MB
-                  </Badge>
-                )}
+              <div className="grid gap-2 sm:grid-cols-2">
+                {performance.map((metric) => {
+                  const status = METRIC_STATUS[metric.status];
+                  return (
+                    <div
+                      key={metric.name}
+                      className="rounded-lg border border-border/60 bg-muted/20 px-3 py-2"
+                    >
+                      <div className="flex items-baseline justify-between gap-2">
+                        <span className="text-sm text-muted-foreground">{metric.name}</span>
+                        <span
+                          className={`font-mono text-sm tabular-nums ${metric.value === null ? "text-muted-foreground" : "font-semibold"}`}
+                        >
+                          {metric.value ?? "Not measured"}
+                        </span>
+                      </div>
+                      <div className="mt-1 flex items-center justify-between gap-2 text-xs">
+                        <span className="text-muted-foreground">Target {metric.target ?? "—"}</span>
+                        <span className={`flex items-center gap-1.5 ${status.className}`}>
+                          <span className={`h-1.5 w-1.5 rounded-full ${status.dot}`} />
+                          {status.label}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
-              {view.performance.summary && (
-                <p className="mt-3 text-sm text-muted-foreground">{view.performance.summary}</p>
-              )}
-              {view.performance.lighthouse.some((entry) => entry.score !== null) && (
-                <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                  {view.performance.lighthouse.map((entry) => (
-                    <ScoreStat key={entry.name} label={entry.name} score={entry.score} />
-                  ))}
-                </div>
+              {measuredMetrics.length === 0 && (
+                <p className="mt-3 text-xs text-muted-foreground">
+                  No runtime metric was measured for this submission — the numbers above are not
+                  estimates, they are gaps.
+                </p>
               )}
               {view.performance.vitals.length > 0 && (
-                <>
-                  <div className="mt-4 flex flex-wrap gap-6 text-sm text-muted-foreground">
-                    {view.performance.vitals.map((vital) => (
-                      <span key={vital.name}>
-                        {vital.name} {vital.value ?? "—"}
-                        {vital.unit}
-                      </span>
-                    ))}
-                  </div>
-                  <div className="mt-4">
-                    <Suspense
-                      fallback={
-                        <div className="h-[180px] w-full animate-pulse rounded-lg bg-muted/40" />
-                      }
+                <div className="mt-4">
+                  <Suspense
+                    fallback={
+                      <div className="h-[180px] w-full animate-pulse rounded-lg bg-muted/40" />
+                    }
+                  >
+                    <PerformanceChart
+                      vitals={view.performance.vitals.map((vital) => ({
+                        name: vital.name,
+                        value: vital.value ?? null,
+                        threshold: vital.threshold ?? null,
+                      }))}
+                    />
+                  </Suspense>
+                </div>
+              )}
+            </ReportSection>
+
+            {/* 07 · Security */}
+            <ReportSection
+              value="security"
+              title="Security"
+              icon={<ShieldCheck className="h-4 w-4" />}
+              count={security.issues.length}
+              tone={
+                security.issues.some((issue) => issue.severity === "critical")
+                  ? "destructive"
+                  : "warning"
+              }
+            >
+              {security.summary && (
+                <p className="text-sm text-muted-foreground">{security.summary}</p>
+              )}
+              {security.issues.length === 0 ? (
+                <div className="mt-3">
+                  <EmptyNote>
+                    No exposed credentials or unsafe configuration were detected in the repository.
+                  </EmptyNote>
+                </div>
+              ) : (
+                <ul className="mt-4 space-y-3">
+                  {security.issues.map((issue, index) => (
+                    <li
+                      key={`${issue.title}-${index}`}
+                      className="rounded-lg border border-border/70 bg-card/40 p-3"
                     >
-                      <PerformanceChart
-                        vitals={view.performance.vitals.map((v) => ({
-                          name: v.name,
-                          value: v.value ?? null,
-                          threshold: v.threshold ?? null,
-                        }))}
-                      />
-                    </Suspense>
-                  </div>
-                </>
-              )}
-              {view.performance.summary === null &&
-                view.performance.vitals.length === 0 &&
-                !view.performance.lighthouse.some((entry) => entry.score !== null) && <EmptyNote />}
-            </ReportSection>
-
-            <ReportSection
-              value="maintainability"
-              title="Maintainability"
-              icon={<Wrench className="h-4 w-4" />}
-            >
-              <div className="flex items-baseline gap-2">
-                <span
-                  className={`text-3xl font-semibold tabular-nums ${
-                    view.scores.maintainability === null
-                      ? "text-muted-foreground"
-                      : scoreTone(view.scores.maintainability)
-                  }`}
-                >
-                  {view.scores.maintainability ?? "—"}
-                </span>
-                <span className="text-sm text-muted-foreground">/ 100</span>
-              </div>
-              {view.maintainability.summary ? (
-                <p className="mt-3 text-sm text-muted-foreground">{view.maintainability.summary}</p>
-              ) : (
-                <p className="mt-3 text-sm text-muted-foreground">
-                  No maintainability summary was stored with this report.
-                </p>
-              )}
-              {view.maintainability.notes.length > 0 && (
-                <div className="mt-4">
-                  <BulletList items={view.maintainability.notes} />
-                </div>
-              )}
-            </ReportSection>
-
-            <ReportSection
-              value="documentation"
-              title="Documentation"
-              icon={<FileWarning className="h-4 w-4" />}
-            >
-              <div className="flex items-baseline gap-2">
-                <span
-                  className={`text-3xl font-semibold tabular-nums ${
-                    view.scores.documentation === null
-                      ? "text-muted-foreground"
-                      : scoreTone(view.scores.documentation)
-                  }`}
-                >
-                  {view.scores.documentation ?? "—"}
-                </span>
-                <span className="text-sm text-muted-foreground">/ 100</span>
-              </div>
-              {view.documentation.summary ? (
-                <p className="mt-3 text-sm text-muted-foreground">{view.documentation.summary}</p>
-              ) : (
-                <p className="mt-3 text-sm text-muted-foreground">
-                  No documentation evidence was recorded — not enough evidence.
-                </p>
-              )}
-              {view.documentation.notes.length > 0 && (
-                <div className="mt-4">
-                  <BulletList items={view.documentation.notes} />
-                </div>
-              )}
-            </ReportSection>
-
-            <ReportSection
-              value="testing"
-              title="Testing"
-              icon={<ListChecks className="h-4 w-4" />}
-              tone="warning"
-            >
-              <div className="flex items-baseline gap-2">
-                <span
-                  className={`text-3xl font-semibold tabular-nums ${
-                    view.scores.testing === null
-                      ? "text-muted-foreground"
-                      : scoreTone(view.scores.testing)
-                  }`}
-                >
-                  {view.scores.testing ?? "—"}
-                </span>
-                <span className="text-sm text-muted-foreground">/ 100</span>
-              </div>
-              {view.testing.summary ? (
-                <p className="mt-3 text-sm text-muted-foreground">{view.testing.summary}</p>
-              ) : (
-                <p className="mt-3 text-sm text-muted-foreground">
-                  No testing evidence was recorded — not enough evidence.
-                </p>
-              )}
-              {view.testing.notes.length > 0 && (
-                <div className="mt-4">
-                  <BulletList items={view.testing.notes} />
-                </div>
-              )}
-            </ReportSection>
-
-            <ReportSection
-              value="risks"
-              title="Risks / Findings"
-              icon={<FileWarning className="h-4 w-4" />}
-              count={findings.length || undefined}
-              tone="destructive"
-              defaultOpen
-            >
-              {findings.length > 0 ? (
-                <ul className="space-y-4">
-                  {findings.map((finding, i) => (
-                    <li key={`${finding.title}-${i}`} className="flex gap-3">
-                      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
-                      <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center gap-2 font-medium">
-                          {finding.title}
-                          <SeverityBadge severity={finding.severity} />
-                        </div>
-                        {finding.detail && (
-                          <p className="text-sm text-muted-foreground">{finding.detail}</p>
-                        )}
-                        {finding.mitigation && (
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            Mitigation: {finding.mitigation}
-                          </p>
-                        )}
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge
+                          variant="outline"
+                          className={`text-[11px] uppercase ${SEVERITY_BADGE[issue.severity]}`}
+                        >
+                          {issue.severity}
+                        </Badge>
+                        <span className="text-sm font-medium">{issue.title}</span>
                       </div>
+                      <dl className="mt-2 space-y-1 text-xs">
+                        {issue.evidence && (
+                          <div className="flex gap-3">
+                            <dt className="w-28 shrink-0 text-muted-foreground">Evidence</dt>
+                            <dd className="text-foreground/90">{issue.evidence}</dd>
+                          </div>
+                        )}
+                        <div className="flex gap-3">
+                          <dt className="w-28 shrink-0 text-muted-foreground">Why it matters</dt>
+                          <dd className="text-foreground/90">{issue.impact}</dd>
+                        </div>
+                        {issue.fix && (
+                          <div className="flex gap-3">
+                            <dt className="w-28 shrink-0 text-muted-foreground">Fix</dt>
+                            <dd className="text-foreground/90">{issue.fix}</dd>
+                          </div>
+                        )}
+                      </dl>
                     </li>
                   ))}
                 </ul>
-              ) : (
-                <EmptyNote>No risks or findings were recorded for this report.</EmptyNote>
               )}
             </ReportSection>
 
-            <ReportSection
-              value="recommendations"
-              title="Recommendations"
-              icon={<Lightbulb className="h-4 w-4" />}
-              count={view.recommendations.length || undefined}
-              tone="warning"
-              defaultOpen
-            >
-              {view.recommendations.length > 0 ? (
-                <ol className="space-y-3">
-                  {view.recommendations.map((rec, i) => (
-                    <motion.li
-                      key={`${rec.title}-${i}`}
-                      initial={{ opacity: 0, x: -4 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      transition={{ delay: i * 0.04 }}
-                      className="flex gap-3 text-sm"
-                    >
-                      <span className="mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-md bg-primary/10 font-mono text-xs text-primary">
-                        {i + 1}
-                      </span>
-                      <div>
-                        <div className="flex flex-wrap items-center gap-2 text-foreground">
-                          {rec.title}
-                          {rec.priority && (
-                            <Badge variant="outline" className="text-xs capitalize">
-                              {rec.priority}
-                            </Badge>
-                          )}
-                        </div>
-                        {rec.detail && (
-                          <p className="text-sm text-muted-foreground">{rec.detail}</p>
-                        )}
-                      </div>
-                    </motion.li>
-                  ))}
-                </ol>
-              ) : (
-                <EmptyNote>No recommendations were stored with this report.</EmptyNote>
+            {/* 08 · Code quality */}
+            <ReportSection value="code" title="Code quality" icon={<Layers className="h-4 w-4" />}>
+              <div className="flex flex-wrap items-baseline gap-3">
+                <span className="font-mono text-2xl font-semibold tabular-nums">
+                  {codeQuality.score ?? "—"}
+                  <span className="text-sm font-normal text-muted-foreground">/100</span>
+                </span>
+                {codeQuality.coveragePct !== null && (
+                  <Badge variant="outline" className="text-xs">
+                    Coverage · {codeQuality.coveragePct}%
+                  </Badge>
+                )}
+                {view.evidence?.testFiles != null && (
+                  <Badge variant="outline" className="text-xs">
+                    {view.evidence.testFiles} test file{view.evidence.testFiles === 1 ? "" : "s"}
+                  </Badge>
+                )}
+              </div>
+              {codeQuality.summary && (
+                <p className="mt-3 text-sm text-muted-foreground">{codeQuality.summary}</p>
               )}
-            </ReportSection>
-
-            <ReportSection
-              value="scores"
-              title="Overall Score"
-              icon={<TrendingUp className="h-4 w-4" />}
-              tone="success"
-            >
-              {" "}
-              {scoredDimensions.length > 0 ? (
-                <>
-                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                    {dimensions.map((dimension) => (
-                      <ScoreStat
-                        key={dimension.label}
-                        label={dimension.label}
-                        score={dimension.score}
-                      />
+              {codeQuality.stack.length > 0 && (
+                <div className="mt-4">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                    Stack
+                  </p>
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {codeQuality.stack.map((name) => (
+                      <Badge key={name} variant="secondary" className="text-xs">
+                        {name}
+                      </Badge>
                     ))}
                   </div>
-                  {view.scoreBreakdown && view.scoreBreakdown.dimensions.length > 0 && (
-                    <div className="mt-5">
-                      <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                        How the overall score is calculated
-                      </p>
-                      <ul className="space-y-2">
-                        {view.scoreBreakdown.dimensions.map((dimension) => (
-                          <li
-                            key={dimension.key}
-                            className="flex flex-wrap items-baseline gap-2 text-sm text-muted-foreground"
-                          >
-                            <span className="font-medium text-foreground">{dimension.label}</span>
-                            <span className="font-mono text-xs">
-                              {dimension.score === null ? "—" : dimension.score}
-                            </span>
-                            <span className="text-xs">
-                              weight {Math.round(dimension.weight * 100)}%
-                            </span>
-                            {dimension.contribution !== null && (
-                              <span className="text-xs">
-                                contributes {dimension.contribution} pts
-                              </span>
-                            )}
-                            <span className="w-full text-xs">{dimension.rationale}</span>
-                          </li>
-                        ))}
-                      </ul>
+                </div>
+              )}
+              <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                    Testing
+                  </p>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    {codeQuality.testing ?? "No testing evidence was recorded."}
+                  </p>
+                  {codeQuality.testingNotes.length > 0 && (
+                    <div className="mt-2">
+                      <BulletList items={codeQuality.testingNotes} />
                     </div>
                   )}
-                </>
-              ) : (
-                <EmptyNote>No scores have been stored for this report yet.</EmptyNote>
-              )}
-            </ReportSection>
-
-            {/* Detail sections that only render when the payload carries data */}
-            {view.repository && (
-              <ReportSection
-                value="repo"
-                title="Repository"
-                icon={<Github className="h-4 w-4" />}
-                count={view.repository.contributors ?? undefined}
-              >
-                {view.repository.url && (
-                  <a
-                    href={view.repository.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex items-center gap-1.5 text-sm text-primary hover:underline"
-                  >
-                    {view.repository.url} <ExternalLink className="h-3.5 w-3.5" />
-                  </a>
-                )}
-                <div className="mt-4 grid grid-cols-3 gap-3 sm:grid-cols-5">
-                  {[
-                    { label: "Stars", value: view.repository.stars },
-                    { label: "Forks", value: view.repository.forks },
-                    { label: "Commits", value: view.repository.commits },
-                    { label: "Contributors", value: view.repository.contributors },
-                    { label: "Open issues", value: view.repository.openIssues },
-                  ].map((stat) => (
-                    <div
-                      key={stat.label}
-                      className="rounded-lg bg-muted/50 px-3 py-2.5 text-center"
-                    >
-                      <p className="text-lg font-semibold tabular-nums">{stat.value ?? "—"}</p>
-                      <p className="text-xs text-muted-foreground">{stat.label}</p>
-                    </div>
-                  ))}
                 </div>
-                {view.repository.languages.length > 0 && (
-                  <div className="mt-5">
-                    <p className="mb-3 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                      Language mix
-                    </p>
-                    <ul className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                      {view.repository.languages.map((language) => (
-                        <li key={language.name} className="flex items-center gap-1.5">
-                          <span
-                            className="h-2 w-2 rounded-full"
-                            style={{
-                              background: `hsl(${(language.name.length * 60) % 360} 70% 55%)`,
-                            }}
-                          />
-                          {language.name}
-                          {language.pct > 0 ? ` · ${language.pct}%` : ""}
-                        </li>
-                      ))}
-                    </ul>
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                    Maintainability
+                  </p>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    {codeQuality.maintainability ?? "No maintainability evidence was recorded."}
+                  </p>
+                  {codeQuality.maintainabilityNotes.length > 0 && (
+                    <div className="mt-2">
+                      <BulletList items={codeQuality.maintainabilityNotes} />
+                    </div>
+                  )}
+                </div>
+              </div>
+              {codeQuality.findings.length > 0 && (
+                <div className="mt-4">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                    What was found
+                  </p>
+                  <div className="mt-2">
+                    <BulletList items={codeQuality.findings} icon="check" />
                   </div>
-                )}
-                {view.repository.commitActivity.length > 0 && (
-                  <div className="mt-5">
-                    <p className="mb-3 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                      Commit activity
-                    </p>
-                    <Suspense
-                      fallback={
-                        <div className="h-[140px] w-full animate-pulse rounded-lg bg-muted/40" />
-                      }
-                    >
-                      <RepositoryChart commitActivity={view.repository.commitActivity} />
-                    </Suspense>
-                  </div>
-                )}
-                {view.repository.notes.length > 0 && (
-                  <ul className="mt-4 space-y-2">
-                    {view.repository.notes.map((note) => (
-                      <li key={note} className="flex gap-2 text-sm text-muted-foreground">
-                        <Check className="mt-0.5 h-4 w-4 text-success" /> {note}
+                </div>
+              )}
+              {view.architecture.layers.length > 0 && (
+                <div className="mt-4">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                    Structure
+                  </p>
+                  <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground">
+                    {view.architecture.layers.map((layer) => (
+                      <li key={layer.name}>
+                        <span className="text-foreground">{layer.name}</span>
+                        {layer.detail ? ` · ${layer.detail}` : ""}
                       </li>
                     ))}
                   </ul>
-                )}
-              </ReportSection>
-            )}
-
-            {view.website && (
-              <ReportSection value="website" title="Website" icon={<Globe className="h-4 w-4" />}>
-                {view.website.url && (
-                  <a
-                    href={view.website.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex items-center gap-1.5 text-sm text-primary hover:underline"
-                  >
-                    {view.website.url} <ExternalLink className="h-3.5 w-3.5" />
-                  </a>
-                )}
-                {view.website.status && (
-                  <Badge
-                    variant="outline"
-                    className="ml-3 border-success/30 bg-success/10 text-success"
-                  >
-                    {view.website.status}
-                  </Badge>
-                )}
-                <div className="mt-4 flex flex-wrap gap-6 text-sm text-muted-foreground">
-                  {view.website.vitals.map((vital) => (
-                    <span key={vital.name}>
-                      {vital.name} {vital.value ?? "—"}
-                      {vital.unit}
-                    </span>
-                  ))}
-                  {view.website.pageWeightMb !== null && (
-                    <span>Page weight {view.website.pageWeightMb} MB</span>
-                  )}
                 </div>
-              </ReportSection>
-            )}
+              )}
+            </ReportSection>
 
-            {view.documentAnalysis && (
-              <ReportSection
-                value="document"
-                title="Document Analysis"
-                icon={<FileText className="h-4 w-4" />}
-                count={view.documentAnalysis.totalPages ?? undefined}
-                tone="warning"
-              >
-                <div className="space-y-4">
-                  {/* Extraction status — did OCR/text extraction work? */}
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Badge
-                      variant="outline"
-                      className={documentStatusBadge(view.documentAnalysis.status).className}
-                    >
-                      {documentStatusBadge(view.documentAnalysis.status).label}
-                    </Badge>
-                    {view.documentAnalysis.method && (
-                      <Badge
-                        variant="outline"
-                        className="border-border bg-muted/60 text-muted-foreground"
-                      >
-                        {view.documentAnalysis.method === "ocr" || view.documentAnalysis.ocrApplied
-                          ? "Read via OCR"
-                          : "Text extracted"}
-                      </Badge>
-                    )}
-                    <span className="text-xs text-muted-foreground">
-                      {view.documentAnalysis.fileName ?? "Submitted document"}
-                      {typeof view.documentAnalysis.totalPages === "number" &&
-                        ` · ${view.documentAnalysis.totalPages} ${view.documentAnalysis.fileType === "pptx" ? "slides" : "pages"}`}
-                      {typeof view.documentAnalysis.charsExtracted === "number" &&
-                        view.documentAnalysis.charsExtracted > 0 &&
-                        ` · ${view.documentAnalysis.charsExtracted.toLocaleString()} characters read`}
-                    </span>
-                  </div>
-
-                  {view.documentAnalysis.status === "failed" ? (
-                    <div className="space-y-2">
-                      <p className="rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
-                        {view.documentAnalysis.error ??
-                          "The submitted document could not be read, so no claims were extracted from it."}
-                      </p>
-                      <p className="text-sm text-muted-foreground">
-                        The document is still part of the submission and can be reviewed manually —
-                        only the automatic text/claim extraction failed.
-                      </p>
-                    </div>
-                  ) : (
-                    <>
-                      {/* The disclaimer: these are CLAIMS, not verified facts. */}
-                      <p className="flex items-start gap-2 rounded-lg border border-warning/30 bg-warning/10 p-3 text-sm font-medium text-warning">
-                        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
-                        {view.documentAnalysis.disclaimer ??
-                          "Claims from the submitted document — these are the team's own assertions, not automatically verified facts."}
-                      </p>
-
-                      {view.documentAnalysis.claims?.summary && (
-                        <div className="space-y-1">
-                          <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                            What the team claims this project does
-                          </p>
-                          <p className="text-sm text-foreground">
-                            {view.documentAnalysis.claims.summary}
-                          </p>
-                        </div>
-                      )}
-
-                      {view.documentAnalysis.claims ? (
-                        <div className="grid gap-3 sm:grid-cols-2">
-                          {DOCUMENT_CLAIM_GROUPS.map(({ key, label }) => {
-                            const items = view.documentAnalysis?.claims?.[key] ?? [];
-                            return (
-                              <div
-                                key={key}
-                                className="rounded-lg border border-border bg-muted/30 p-3"
-                              >
-                                <p className="text-xs font-semibold text-foreground">{label}</p>
-                                {items.length === 0 ? (
-                                  <p className="mt-1 text-xs italic text-muted-foreground">
-                                    Not stated in the document
-                                  </p>
-                                ) : (
-                                  <ul className="mt-1.5 space-y-1.5">
-                                    {items.map((item, i) => (
-                                      <li
-                                        key={`${key}-${i}`}
-                                        className="flex gap-2 text-sm text-muted-foreground"
-                                      >
-                                        <span className={listIcon} />
-                                        {item}
-                                      </li>
-                                    ))}
-                                  </ul>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      ) : (
-                        <EmptyNote>
-                          No claims could be extracted from the document (nothing readable was
-                          found).
-                        </EmptyNote>
-                      )}
-
-                      {view.documentAnalysis.warnings.length > 0 && (
-                        <ul className="space-y-1">
-                          {view.documentAnalysis.warnings.map((warning) => (
-                            <li
-                              key={warning}
-                              className="flex items-start gap-2 text-sm text-warning"
-                            >
-                              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
-                              {warning}
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-
-                      <p className="text-sm text-muted-foreground">
-                        These claims are handed to the evaluation pipeline, which checks them
-                        against the repository and the deployed website — see Claim Verification for
-                        the outcome.
-                      </p>
-                    </>
-                  )}
-                </div>
-              </ReportSection>
-            )}
-
-            {view.claims.length > 0 && (
-              <ReportSection
-                value="claims"
-                title="Claim Verification"
-                icon={<ListChecks className="h-4 w-4" />}
-                count={view.claims.length}
-                tone="warning"
-              >
-                <ul className="space-y-4">
-                  {view.claims.map((claim, i) => (
-                    <motion.li
-                      key={`${claim.claim}-${i}`}
-                      initial={{ opacity: 0, x: -4 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      transition={{ delay: i * 0.05 }}
-                      className="flex gap-3"
-                    >
-                      {claim.verified ? (
-                        <CheckCircle2 className="h-5 w-5 shrink-0 text-success" />
-                      ) : (
-                        <XCircle className="h-5 w-5 shrink-0 text-destructive" />
-                      )}
-                      <div>
-                        <p className="font-medium">{claim.claim}</p>
-                        {claim.evidence && (
-                          <p className="text-sm text-muted-foreground">{claim.evidence}</p>
+            {/* 09 · Documentation */}
+            <ReportSection
+              value="documentation"
+              title="Documentation"
+              icon={<FileText className="h-4 w-4" />}
+            >
+              <div className="flex items-baseline gap-2">
+                <span className="font-mono text-2xl font-semibold tabular-nums">
+                  {documentation.score ?? "—"}
+                  <span className="text-sm font-normal text-muted-foreground">/100</span>
+                </span>
+              </div>
+              <ul className="mt-3 space-y-2">
+                {documentation.rows.map((row) => {
+                  const state = DOC_STATE[row.state];
+                  return (
+                    <li key={row.label} className="flex items-start gap-2 text-sm">
+                      <span className={`mt-0.5 w-4 shrink-0 ${state.className}`} aria-hidden>
+                        {state.glyph}
+                      </span>
+                      <span className="min-w-0">
+                        <span className="text-foreground">{row.label}</span>
+                        <span className="ml-2 text-xs text-muted-foreground">
+                          {row.state === "present"
+                            ? "documented"
+                            : row.state === "missing"
+                              ? "missing"
+                              : "partially documented"}
+                        </span>
+                        {row.note && (
+                          <span className="block text-xs text-muted-foreground">{row.note}</span>
                         )}
-                      </div>
-                      <Badge
-                        variant="outline"
-                        className={`ml-auto self-start ${claim.verified ? "border-success/30 bg-success/10 text-success" : "border-destructive/30 bg-destructive/10 text-destructive"}`}
-                      >
-                        {claim.verified ? "Verified" : "Unverified"}
-                      </Badge>
-                    </motion.li>
-                  ))}
-                </ul>
-              </ReportSection>
-            )}
-
-            {view.innovation && (
-              <ReportSection
-                value="innovation"
-                title="Innovation"
-                icon={<CircuitBoard className="h-4 w-4" />}
-                tone="success"
-              >
-                <div className="flex items-baseline gap-2">
-                  <span
-                    className={`text-4xl font-semibold tabular-nums ${
-                      view.innovation.score === null
-                        ? "text-muted-foreground"
-                        : scoreTone(view.innovation.score)
-                    }`}
-                  >
-                    {view.innovation.score ?? "—"}
-                  </span>
-                  <span className="text-sm text-muted-foreground">/ 100</span>
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+              {documentation.notes.length > 0 && (
+                <div className="mt-4">
+                  <BulletList items={documentation.notes} />
                 </div>
-                {view.innovation.summary && (
-                  <p className="mt-2 text-sm text-muted-foreground">{view.innovation.summary}</p>
-                )}
-                {view.innovation.comparable && (
-                  <p className="mt-3 text-xs text-muted-foreground">
-                    <strong className="text-foreground">Closest analogue:</strong>{" "}
-                    {view.innovation.comparable}
+              )}
+              {view.documentation.summary && (
+                <p className="mt-3 text-xs text-muted-foreground">{view.documentation.summary}</p>
+              )}
+            </ReportSection>
+
+            {/* 10 · Evidence sources */}
+            <ReportSection
+              value="evidence"
+              title="Evidence sources"
+              icon={<FileCheck2 className="h-4 w-4" />}
+              count={insights.evidenceSources.filter((source) => source.available === true).length}
+            >
+              <ul className="space-y-3">
+                {insights.evidenceSources.map((source) => {
+                  const glyph =
+                    source.available === true ? "✓" : source.available === false ? "✕" : "—";
+                  const className =
+                    source.available === true
+                      ? "text-success"
+                      : source.available === false
+                        ? "text-destructive"
+                        : "text-muted-foreground";
+                  return (
+                    <li key={source.key} className="flex items-start gap-3">
+                      <span
+                        className={`mt-0.5 w-4 shrink-0 font-semibold ${className}`}
+                        aria-hidden
+                      >
+                        {glyph}
+                      </span>
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium">{source.label}</p>
+                        <p className="text-xs text-muted-foreground">{source.detail}</p>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+              {view.documentAnalysis && (
+                <div className="mt-4 space-y-2 border-t border-border/60 pt-3">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                    Document extraction
                   </p>
-                )}
-                {view.innovation.markers.length > 0 && (
-                  <>
-                    <Separator className="my-4" />
-                    <ul className="space-y-2">
-                      {view.innovation.markers.map((marker) => (
-                        <li key={marker.label} className="text-sm text-muted-foreground">
-                          <strong className="text-foreground">{marker.label}:</strong>{" "}
-                          {marker.detail ?? "—"}
+                  <p className="text-xs text-muted-foreground">
+                    {view.documentAnalysis.fileName ?? "Submitted document"}
+                    {view.documentAnalysis.totalPages !== null &&
+                      ` · ${view.documentAnalysis.totalPages} ${view.documentAnalysis.fileType === "pptx" ? "slides" : "pages"}`}
+                    {view.documentAnalysis.charsExtracted !== null &&
+                      ` · ${view.documentAnalysis.charsExtracted.toLocaleString()} characters`}
+                    {view.documentAnalysis.ocrApplied ? " · read via OCR" : ""}
+                  </p>
+                  {view.documentAnalysis.error && (
+                    <p className="text-xs text-destructive">{view.documentAnalysis.error}</p>
+                  )}
+                  {view.documentAnalysis.warnings.length > 0 && (
+                    <ul className="space-y-1">
+                      {view.documentAnalysis.warnings.map((warning) => (
+                        <li key={warning} className="text-xs text-warning">
+                          {warning}
                         </li>
                       ))}
                     </ul>
-                  </>
-                )}
-              </ReportSection>
-            )}
+                  )}
+                  <p className="text-xs text-muted-foreground">
+                    {view.documentAnalysis.disclaimer ??
+                      "Claims from the submitted document are the team's own assertions, not verified facts."}
+                  </p>
+                </div>
+              )}
+            </ReportSection>
 
-            {view.interviewQuestions.length > 0 && (
-              <ReportSection
-                value="interview"
-                title="Interview Questions"
-                icon={<MessagesSquare className="h-4 w-4" />}
-                count={view.interviewQuestions.length}
-              >
-                <ol className="space-y-3">
-                  {view.interviewQuestions.map((q, i) => (
-                    <li key={`${q}-${i}`} className="flex gap-3 text-sm">
-                      <span className="mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-md bg-primary/10 font-mono text-xs text-primary">
-                        {i + 1}
-                      </span>
-                      <span className="text-muted-foreground">{q}</span>
-                    </li>
-                  ))}
-                </ol>
-              </ReportSection>
-            )}
-
-            {view.judgeQuestions.length > 0 && (
-              <ReportSection
-                value="judge"
-                title="Judge Questions"
-                icon={<Gavel className="h-4 w-4" />}
-                count={view.judgeQuestions.length}
-              >
-                <ol className="space-y-3">
-                  {view.judgeQuestions.map((q, i) => (
-                    <li key={`${q}-${i}`} className="flex gap-3 text-sm">
-                      <span className="mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-md bg-primary/10 font-mono text-xs text-primary">
-                        {i + 1}
-                      </span>
-                      <span className="text-muted-foreground">{q}</span>
-                    </li>
-                  ))}
-                </ol>
-              </ReportSection>
-            )}
-
-            {view.timeline.length > 0 && (
-              <ReportSection
-                value="timeline"
-                title="Timeline"
-                icon={<GitBranch className="h-4 w-4" />}
-              >
-                <ol className="relative ml-2 space-y-4 border-l border-border pl-6">
-                  {view.timeline.map((entry, i) => (
-                    <motion.li
-                      key={`${entry.time}-${i}`}
-                      initial={{ opacity: 0, x: -4 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      transition={{ delay: i * 0.05 }}
-                      className="relative"
-                    >
-                      <span className="absolute -left-[29px] top-1.5 h-2.5 w-2.5 rounded-full bg-primary" />
-                      <p className="font-mono text-xs text-muted-foreground">{entry.time}</p>
-                      <p className="text-sm">{entry.event}</p>
-                    </motion.li>
-                  ))}
-                </ol>
-              </ReportSection>
-            )}
+            {/* 11 · Pipeline (how the verdict was produced) */}
+            <ReportSection
+              value="pipeline"
+              title="Evaluation pipeline"
+              icon={<TrendingUp className="h-4 w-4" />}
+            >
+              <EvaluationPipeline stages={pipelineStages} />
+              {view.analysis && view.analysis.limitations.length > 0 && (
+                <div className="mt-4">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                    What this analysis could not do
+                  </p>
+                  <ul className="mt-2 space-y-1">
+                    {view.analysis.limitations.map((limitation) => (
+                      <li key={limitation} className="flex gap-2 text-xs text-muted-foreground">
+                        <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                        <span>{limitation}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </ReportSection>
           </Accordion>
-        )}
+        </div>
+
+        {/* ── 11. RECOMMENDATIONS ────────────────────────────────────────── */}
+        <section className="surface p-6">
+          <SectionHeading index="04" title="Recommendations" hint="Highest priority first" />
+          {insights.recommendations.length === 0 ? (
+            <div className="mt-3">
+              <EmptyNote>No recommendations were recorded for this report.</EmptyNote>
+            </div>
+          ) : (
+            <ol className="mt-3 space-y-3">
+              {insights.recommendations.map((recommendation, index) => (
+                <li key={`${recommendation.title}-${index}`} className="flex gap-3">
+                  <span className="mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-md bg-muted font-mono text-xs text-muted-foreground">
+                    {index + 1}
+                  </span>
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span
+                        className={`text-[11px] font-semibold uppercase tracking-wide ${
+                          recommendation.priority === "critical"
+                            ? "text-destructive"
+                            : recommendation.priority === "high"
+                              ? "text-warning"
+                              : "text-muted-foreground"
+                        }`}
+                      >
+                        {recommendation.priority}
+                      </span>
+                      <span className="text-sm font-medium">{recommendation.title}</span>
+                    </div>
+                    {recommendation.detail && (
+                      <p className="mt-0.5 text-xs text-muted-foreground">
+                        {recommendation.detail}
+                      </p>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ol>
+          )}
+        </section>
+
+        {/* ── 12. FINAL VERDICT ──────────────────────────────────────────── */}
+        <section className="surface p-6">
+          <SectionHeading index="05" title="Final verdict" hint={`${overall ?? "—"}/100`} />
+          <div className="mt-3 grid gap-6 sm:grid-cols-2">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-success">
+                Strong points
+              </p>
+              {insights.finalVerdict.strong.length > 0 ? (
+                <div className="mt-2">
+                  <BulletList items={insights.finalVerdict.strong} icon="check" />
+                </div>
+              ) : (
+                <p className="mt-2 text-sm text-muted-foreground">None recorded.</p>
+              )}
+            </div>
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-destructive">
+                Main concerns
+              </p>
+              {insights.finalVerdict.concerns.length > 0 ? (
+                <div className="mt-2">
+                  <BulletList items={insights.finalVerdict.concerns} icon="cross" />
+                </div>
+              ) : (
+                <p className="mt-2 text-sm text-muted-foreground">None recorded.</p>
+              )}
+            </div>
+          </div>
+          <p className="mt-5 border-l-2 border-primary/50 pl-4 text-sm italic text-foreground/90">
+            “{insights.finalVerdict.takeaway}”
+          </p>
+          <p className="mt-4 text-xs text-muted-foreground">
+            Every number in this report comes from evidence that was read: the submitted documents,
+            the repository listing and, when present, measurements of the deployed site. Nothing
+            here is an AI estimate.
+          </p>
+        </section>
       </div>
     </AppLayout>
   );

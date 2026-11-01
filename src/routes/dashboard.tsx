@@ -33,6 +33,8 @@ import {
 } from "@/components/motion/primitives";
 import { SpotlightCard } from "@/components/ui/spotlight-card";
 import { useAuth } from "@/hooks/useAuth";
+import { useCandidateSubmissions } from "@/hooks/useHackathonPortal";
+import { SubmissionLifecycleCard } from "@/components/hackathons/SubmissionLifecycleCard";
 import { useProjectsQuery, useReportsQuery } from "@/hooks/useWorkspaceQueries";
 import type { UserRole } from "@/types/auth";
 import { cn } from "@/lib/utils";
@@ -201,6 +203,9 @@ function Dashboard() {
   // first frame and revalidates in the background instead of refetching.
   const reportsQuery = useReportsQuery(user?.id);
   const projectsQuery = useProjectsQuery(user?.id);
+  // Submissions sent to a hackathon — the judge portal reads these same rows.
+  const submissionsQuery = useCandidateSubmissions();
+  const portalSubmissions = submissionsQuery.data ?? [];
 
   const reportsList = reportsQuery.data ?? [];
   const projects = projectsQuery.data ?? [];
@@ -320,6 +325,32 @@ function Dashboard() {
           </StaggerContainer>
         )}
       </section>
+
+      {/* Hackathon submissions — status as the judges see it, plus published results */}
+      {portalSubmissions.length > 0 && (
+        <section aria-label="Hackathon submissions" className="mb-10">
+          <div className="mb-4">
+            <h2 className="text-lg font-semibold">Hackathon submissions</h2>
+            <p className="text-sm text-muted-foreground">
+              The records the judges score — lifecycle status and any published result.
+            </p>
+          </div>
+          <div className="grid gap-5 md:grid-cols-2">
+            {portalSubmissions.map(({ submission, hackathon }) => (
+              <div key={submission.id} className="flex flex-col gap-2">
+                <SubmissionLifecycleCard hackathon={hackathon} submission={submission} />
+                <Link
+                  to="/submission/$id"
+                  params={{ id: submission.id }}
+                  className="inline-flex items-center gap-1 self-start text-xs text-primary hover:underline"
+                >
+                  Open submission status <ArrowRight className="h-3.5 w-3.5" />
+                </Link>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       {/* Projects */}
       <section aria-label="Your projects" className="mb-10">

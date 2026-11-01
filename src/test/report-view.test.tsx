@@ -83,37 +83,41 @@ describe("report page", () => {
 
     // Header + stored score (not a hardcoded value).
     expect(await screen.findByRole("heading", { name: /Nimbus Analytics/i })).toBeInTheDocument();
-    expect(screen.getAllByText("87").length).toBeGreaterThan(0);
     expect(screen.queryByText("Atlas — Climate Risk Dashboard")).toBeNull();
 
     // Status reflects the stored value.
     expect(screen.getAllByText(/Completed/i).length).toBeGreaterThan(0);
-    expect(screen.getByText(/Live report data/i)).toBeInTheDocument();
+    expect(screen.getByText(/^Report data$/i)).toBeInTheDocument();
 
-    // Required sections exist, including the derived AI verdict section.
+    // Level 1: executive summary, score breakdown and claim verification.
+    for (const title of ["Executive summary", "Score breakdown", "Claim verification"]) {
+      expect(screen.getByText(title)).toBeInTheDocument();
+    }
+    // Level 2 sections are present in the fixed order.
     for (const title of [
-      "AI Verdict",
-      "AI Analysis & Pre-Assessment",
-      "Executive Summary",
-      "Project Overview",
-      "Architecture / Technology Stack",
-      "Code Quality",
-      "Security",
+      "Functionality",
+      "Deployment & runtime",
       "Performance",
-      "Maintainability",
-      "Risks / Findings",
+      "Security",
+      "Code quality",
+      "Documentation",
+      "Evidence sources",
       "Recommendations",
-      "Overall Score",
+      "Final verdict",
     ]) {
       expect(screen.getAllByText(title).length).toBeGreaterThan(0);
     }
 
-    // Real payload content is rendered, including recommendations and risks.
+    // A score is shown, and the stored executive summary explains the number.
+    expect(screen.getAllByText(/\/100/).length).toBeGreaterThan(0);
     expect(
       screen.getByText(/Nimbus ships a tested analytics core with a clean data model\./i),
     ).toBeInTheDocument();
     expect(screen.getByText("Split the bundle")).toBeInTheDocument();
-    expect(screen.getAllByText("Unbounded queue").length).toBeGreaterThan(0);
+
+    // The medium-severity risk is filed under Security, not repeated elsewhere.
+    fireEvent.click(screen.getByRole("button", { name: /Security/i }));
+    expect(await screen.findByText("Unbounded queue")).toBeInTheDocument();
   }, 20000);
 
   it("shows deck claims under an unverified-claims disclaimer", async () => {
@@ -157,14 +161,18 @@ describe("report page", () => {
 
     await renderRoute(`/report/${report.id}`);
 
-    // The section is only rendered when the payload actually carries a deck.
-    const trigger = await screen.findByRole("button", { name: /Document Analysis/i });
-    fireEvent.click(trigger);
-
-    expect(await screen.findByText(/not automatically verified facts/i)).toBeInTheDocument();
-    expect(screen.getByText(/Farmers cannot see soil moisture in real time/)).toBeInTheDocument();
+    // Deck claims that were never registered still appear in the claim table —
+    // unverified, never silently dropped.
+    expect(
+      await screen.findByText(/Farmers cannot see soil moisture in real time/),
+    ).toBeInTheDocument();
     expect(screen.getByText(/We reduced water usage by 30%/)).toBeInTheDocument();
-    expect(screen.getByText(/aquasense\.pptx/)).toBeInTheDocument();
+    expect(screen.getAllByText(/Unverified/i).length).toBeGreaterThan(0);
+
+    // The extraction is cited as an evidence source, with the claim disclaimer.
+    fireEvent.click(screen.getByRole("button", { name: /Evidence sources/i }));
+    expect(await screen.findByText(/not automatically verified facts/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/aquasense\.pptx/).length).toBeGreaterThan(0);
   }, 20000);
 
   it("does not present an in-progress report as finished", async () => {
@@ -183,7 +191,6 @@ describe("report page", () => {
     expect(screen.getByText(/Awaiting analysis data/i)).toBeInTheDocument();
     // No fabricated score: the rings render the em dash instead of a number.
     expect(screen.queryByText("87")).toBeNull();
-    expect(screen.queryByText("Strong submission")).toBeNull();
     expect(screen.getByText(/No score stored for this report\./i)).toBeInTheDocument();
   }, 20000);
 

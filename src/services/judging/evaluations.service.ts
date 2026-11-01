@@ -9,6 +9,7 @@ import type {
   JudgeNote,
 } from "@/types/evaluation";
 import { getSupabase } from "@/lib/supabase";
+import { advanceSubmissionStatus } from "@/services/hackathon.service";
 import { canUseRemote, localId, readJournal, runJudging, writeJournal } from "./store";
 
 /**
@@ -223,7 +224,7 @@ export async function saveEvaluation(input: EvaluationDraftInput): Promise<Judge
     return record;
   };
 
-  return runJudging(
+  const record = await runJudging(
     canUseRemote(input.judgeId),
     async () => {
       const supabase = getSupabase();
@@ -297,6 +298,35 @@ export async function saveEvaluation(input: EvaluationDraftInput): Promise<Judge
     },
     local,
   );
+
+  await syncSubmissionLifecycle(input);
+  return record;
+}
+
+/**
+ * Keep the shared submission lifecycle in step with the judge's work.
+ *
+ * Draft → `under_review`, submitted → `evaluated`, so the candidate's status page
+ * follows along without the judge doing anything extra. The status never rewinds
+ * (`advanceSubmissionStatus` is forward-only), and a failure here must not undo a
+ * saved score — the evaluation is the record that matters.
+ */
+async function syncSubmissionLifecycle(input: EvaluationDraftInput): Promise<void> {
+  if (input.category !== "project") return;
+  const prefix = "project:";
+  if (!input.submissionId.startsWith(prefix)) return;
+  const submissionRowId = input.submissionId.slice(prefix.length);
+  if (!submissionRowId || submissionRowId.startsWith("demo-")) return;
+
+  try {
+    await advanceSubmissionStatus(
+      submissionRowId,
+      input.judgeId,
+      input.status === "evaluated" ? "evaluated" : "under_review",
+    );
+  } catch {
+    /* bookkeeping only — the judge's evaluation is already stored */
+  }
 }
 
 /** Remove this judge's evaluation for a submission (reverts it to unevaluated). */

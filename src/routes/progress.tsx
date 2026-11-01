@@ -30,6 +30,8 @@ import { BrandMark } from "@/components/brand/BrandLogo";
 import { EmptyState } from "@/components/state/EmptyState";
 import { ErrorState } from "@/components/state/ErrorState";
 import { useAuth } from "@/hooks/useAuth";
+import { useCandidateSubmissions } from "@/hooks/useHackathonPortal";
+import { SubmissionLifecycleCard } from "@/components/hackathons/SubmissionLifecycleCard";
 import { isSupabaseConfigured } from "@/lib/supabase";
 import { getProject } from "@/services/project.service";
 import { getReport } from "@/services/report.service";
@@ -179,6 +181,14 @@ function ProgressPage() {
   const [navigating, setNavigating] = useState(false);
   // Live stages emitted by the analysis running in this tab (if any).
   const [liveStages, setLiveStages] = useState<AnalysisStage[] | null>(null);
+  // The hackathon submission this project belongs to, if any — same record the
+  // judge portal reads, so the status here is not a local guess.
+  const candidateSubmissions = useCandidateSubmissions();
+  const portalEntry = (candidateSubmissions.data ?? []).find(
+    ({ submission }) =>
+      (projectId && submission.projectId === projectId) ||
+      (reportId && submission.reportId === reportId),
+  );
 
   useEffect(() => {
     if (!reportId) return;
@@ -583,6 +593,14 @@ function ProgressPage() {
             </div>
           </dl>
         </div>
+
+        {/* Hackathon status: the shared lifecycle, plus a published result once it exists */}
+        {portalEntry ? (
+          <SubmissionLifecycleCard
+            hackathon={portalEntry.hackathon}
+            submission={portalEntry.submission}
+          />
+        ) : null}
 
         {/* Progress card */}
         <div className="surface p-6">

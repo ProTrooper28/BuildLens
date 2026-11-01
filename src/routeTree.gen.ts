@@ -38,6 +38,7 @@ import { Route as HackathonsCodeRouteImport } from './routes/hackathons.$code'
 import { Route as ReportIdRouteImport } from './routes/report.$id'
 import { Route as ReviewDeveloperRouteImport } from './routes/review.developer'
 import { Route as ReviewProjectRouteImport } from './routes/review.project'
+import { Route as SubmissionIdRouteImport } from './routes/submission.$id'
 import { Route as ApiEvaluationsIdRouteImport } from './routes/api.evaluations.$id'
 import { Route as EvaluationProjectIndexRouteImport } from './routes/evaluation.project.index'
 import { Route as EvaluationProjectIdRouteImport } from './routes/evaluation.project.$id'
@@ -192,6 +193,11 @@ const ReviewProjectRoute = ReviewProjectRouteImport.update({
   path: '/review/project',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SubmissionIdRoute = SubmissionIdRouteImport.update({
+  id: '/submission/$id',
+  path: '/submission/$id',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiEvaluationsIdRoute = ApiEvaluationsIdRouteImport.update({
   id: '/$id',
   path: '/$id',
@@ -264,6 +270,7 @@ export interface FileRoutesByFullPath {
   '/report/$id': typeof ReportIdRoute
   '/review/developer': typeof ReviewDeveloperRoute
   '/review/project': typeof ReviewProjectRoute
+  '/submission/$id': typeof SubmissionIdRoute
   '/evaluation/': typeof EvaluationIndexRoute
   '/hackathons/': typeof HackathonsIndexRoute
   '/api/evaluations/$id': typeof ApiEvaluationsIdRoute
@@ -299,6 +306,7 @@ export interface FileRoutesByTo {
   '/report/$id': typeof ReportIdRoute
   '/review/developer': typeof ReviewDeveloperRoute
   '/review/project': typeof ReviewProjectRoute
+  '/submission/$id': typeof SubmissionIdRoute
   '/evaluation': typeof EvaluationIndexRoute
   '/hackathons': typeof HackathonsIndexRoute
   '/api/evaluations/$id': typeof ApiEvaluationsIdRoute
@@ -339,6 +347,7 @@ export interface FileRoutesById {
   '/report/$id': typeof ReportIdRoute
   '/review/developer': typeof ReviewDeveloperRoute
   '/review/project': typeof ReviewProjectRoute
+  '/submission/$id': typeof SubmissionIdRoute
   '/evaluation/': typeof EvaluationIndexRoute
   '/hackathons/': typeof HackathonsIndexRoute
   '/api/evaluations/$id': typeof ApiEvaluationsIdRoute
@@ -380,6 +389,7 @@ export interface FileRouteTypes {
     | '/report/$id'
     | '/review/developer'
     | '/review/project'
+    | '/submission/$id'
     | '/evaluation/'
     | '/hackathons/'
     | '/api/evaluations/$id'
@@ -415,6 +425,7 @@ export interface FileRouteTypes {
     | '/report/$id'
     | '/review/developer'
     | '/review/project'
+    | '/submission/$id'
     | '/evaluation'
     | '/hackathons'
     | '/api/evaluations/$id'
@@ -454,6 +465,7 @@ export interface FileRouteTypes {
     | '/report/$id'
     | '/review/developer'
     | '/review/project'
+    | '/submission/$id'
     | '/evaluation/'
     | '/hackathons/'
     | '/api/evaluations/$id'
@@ -488,6 +500,7 @@ export interface RootRouteChildren {
   ReportIdRoute: typeof ReportIdRoute
   ReviewDeveloperRoute: typeof ReviewDeveloperRoute
   ReviewProjectRoute: typeof ReviewProjectRoute
+  SubmissionIdRoute: typeof SubmissionIdRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -695,6 +708,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ReviewProjectRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/submission/$id': {
+      id: '/submission/$id'
+      path: '/submission/$id'
+      fullPath: '/submission/$id'
+      preLoaderRoute: typeof SubmissionIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/evaluations/$id': {
       id: '/api/evaluations/$id'
       path: '/$id'
@@ -866,6 +886,7 @@ const rootRouteChildren: RootRouteChildren = {
   ReportIdRoute: ReportIdRoute,
   ReviewDeveloperRoute: ReviewDeveloperRoute,
   ReviewProjectRoute: ReviewProjectRoute,
+  SubmissionIdRoute: SubmissionIdRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

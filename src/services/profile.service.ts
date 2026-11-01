@@ -1,7 +1,7 @@
 import type { User } from "@supabase/supabase-js";
 
 import { getSupabase } from "@/lib/supabase";
-import type { Profile, ProfileInsert, ProfileUpdate } from "@/types/database";
+import type { AccountType, Profile, ProfileInsert, ProfileUpdate } from "@/types/database";
 import { toAuthMessage } from "@/utils/errors";
 
 /** Build a `profiles` insert from a freshly-created Supabase user. */
@@ -20,14 +20,34 @@ export function buildProfileInsert(user: User): ProfileInsert {
     avatar_url: str("avatar_url"),
   };
 
-  // Conditionally set a sensible default only when the column exists on the
-  // current project's profiles table. This keeps the service resilient if the
-  // schema changes later.
-  if ("account_type" in insert) {
-    insert.account_type = "Developer" as const;
-  }
+  // `profiles.account_type` is the role source the judging policies read
+  // (`public.is_buildlens_judge`), so the role chosen at sign-up has to land
+  // here as well as in the auth metadata — otherwise no account could ever pass
+  // a judge-only policy.
+  insert.account_type = accountTypeFor(user);
 
   return insert;
+}
+
+/** The `profiles.account_type` a user's chosen role implies. */
+function accountTypeFor(user: User): AccountType {
+  return user.user_metadata?.["role"] === "manager" ? "Judge" : "Developer";
+}
+
+/**
+ * Raise an existing profile to Judge when the account signed up as a manager.
+ *
+ * Only ever upgrades: a role picked in the UI must not demote an account an
+ * organizer promoted in the database.
+ */
+async function syncAccountType(profile: Profile, user: User): Promise<Profile> {
+  if (accountTypeFor(user) !== "Judge" || profile.account_type === "Judge") return profile;
+  try {
+    return await updateProfile(profile.id, { account_type: "Judge" });
+  } catch {
+    // The row is still usable; the judging policies will simply keep refusing.
+    return profile;
+  }
 }
 
 /** Fetch a profile row by user id, or `null` when missing. */
@@ -52,7 +72,7 @@ export async function getProfile(userId: string): Promise<Profile | null> {
  */
 export async function ensureProfile(user: User): Promise<Profile | null> {
   const existing = await getProfile(user.id);
-  if (existing) return existing;
+  if (existing) return syncAccountType(existing, user);
 
   const supabase = getSupabase();
 
@@ -72,7 +92,8 @@ export async function ensureProfile(user: User): Promise<Profile | null> {
       throw error;
     }
 
-    return data ?? (await getProfile(user.id));
+    const created = data ?? (await getProfile(user.id));
+    return created ? syncAccountType(created, user) : null;
   } catch (error) {
     // Be conservative: if anything goes wrong during the defensive upsert, fall
     // back to a normal fetch so the app can still render the profile when it

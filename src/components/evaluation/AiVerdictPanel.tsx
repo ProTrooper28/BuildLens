@@ -1,9 +1,13 @@
-import { AlertTriangle, Bot, CheckCircle2, Info, Lightbulb, Search, XCircle } from "lucide-react";
-import { motion } from "framer-motion";
+import { AlertTriangle, Info, Lightbulb, Search } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { SectionHeading } from "@/components/evaluation/shared";
+import {
+  Eyebrow,
+  ListBlock,
+  Surface,
+  SurfaceBody,
+  SurfaceHeader,
+} from "@/components/evaluation/analysis-ui";
 import { cn } from "@/lib/utils";
 import type { SubmissionDetail } from "@/types/evaluation";
 import type { ReportView } from "@/lib/report-data";
@@ -432,12 +436,9 @@ export function deriveVerdictFromReport(view: ReportView): AiVerdictData {
 }
 
 const CONFIDENCE_META = {
-  high: { label: "High confidence", className: "border-success/30 bg-success/10 text-success" },
-  medium: { label: "Medium confidence", className: "border-warning/30 bg-warning/10 text-warning" },
-  low: {
-    label: "Low confidence",
-    className: "border-destructive/30 bg-destructive/10 text-destructive",
-  },
+  high: { label: "High confidence", textClass: "text-success" },
+  medium: { label: "Medium confidence", textClass: "text-warning" },
+  low: { label: "Low confidence", textClass: "text-muted-foreground" },
 };
 
 interface AiVerdictPanelProps {
@@ -446,109 +447,86 @@ interface AiVerdictPanelProps {
   className?: string;
 }
 
-export function AiVerdictPanel({ verdict, title = "AI Verdict", className }: AiVerdictPanelProps) {
+export function AiVerdictPanel({
+  verdict,
+  title = "BuildLens assessment",
+  className,
+}: AiVerdictPanelProps) {
   const confidenceMeta = CONFIDENCE_META[verdict.confidence];
   const verifiedCount = verdict.evidenceNotes.filter((n) => n.status === "verified").length;
   const missingCount = verdict.evidenceNotes.filter((n) => n.status === "missing").length;
 
   return (
-    <Card className={cn("border-primary/20 bg-primary/[0.03] backdrop-blur", className)}>
-      <CardHeader className="space-y-2 border-b border-primary/15 pb-4">
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <Bot className="h-4 w-4 text-primary/70" aria-hidden />
-            <CardTitle className="text-sm font-medium">{title}</CardTitle>
-          </div>
-          <div className="flex flex-wrap items-center gap-1.5">
-            <Badge
-              variant="outline"
-              className={cn("text-[10px] font-normal", confidenceMeta.className)}
-            >
+    <Surface id="ai-verdict" className={className}>
+      <SurfaceHeader
+        eyebrow="AI insights"
+        title={title}
+        description="An interpretation of the submission. It is not a source and not a score — score each criterion independently."
+        aside={
+          <>
+            <span className={cn("text-[11px] font-medium", confidenceMeta.textClass)}>
               {confidenceMeta.label}
-            </Badge>
-            <Badge variant="outline" className="text-[10px] font-normal text-muted-foreground">
+            </span>
+            <span className="text-[11px] text-muted-foreground">
               {verdict.analysisSource === "ai_model"
                 ? (verdict.modelLabel ?? "AI model")
                 : "Submission analysis"}
-            </Badge>
-          </div>
-        </div>
-        <p className="rounded-md border border-primary/15 bg-primary/[0.06] px-2.5 py-1.5 text-[11px] leading-snug text-muted-foreground">
-          <strong className="text-foreground">AI analysis only</strong> - this is not a score and
-          does not replace your judgment. Use it to guide your evaluation, then score each criterion
-          independently.
+            </span>
+          </>
+        }
+      />
+
+      <SurfaceBody className="space-y-5">
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          <strong className="font-medium text-foreground">AI analysis only</strong> — this is not a
+          score and does not replace your judgment. Use it to guide your evaluation, then score each
+          criterion independently.
         </p>
-      </CardHeader>
 
-      <CardContent className="space-y-5 pt-5">
         <div>
-          <SectionHeading className="mb-2">Overall assessment</SectionHeading>
-          <p className="text-sm leading-relaxed text-foreground/85">{verdict.overallAssessment}</p>
+          <Eyebrow>Summary</Eyebrow>
+          <p className="mt-1.5 text-[13px] leading-relaxed text-foreground/90">
+            {verdict.overallAssessment}
+          </p>
         </div>
 
-        {verdict.strengths.length > 0 && (
-          <div>
-            <SectionHeading className="mb-2">Key strengths</SectionHeading>
-            <ul className="space-y-1.5">
-              {verdict.strengths.map((strength, i) => (
-                <motion.li
-                  key={`strength-${i}`}
-                  initial={{ opacity: 0, x: -4 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ delay: i * 0.04 }}
-                  className="flex items-start gap-2 text-xs text-foreground/80"
-                >
-                  <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-success" aria-hidden />
-                  {strength}
-                </motion.li>
-              ))}
-            </ul>
-          </div>
-        )}
-
-        {verdict.weaknesses.length > 0 && (
-          <div>
-            <SectionHeading className="mb-2">Weaknesses / risks</SectionHeading>
-            <ul className="space-y-1.5">
-              {verdict.weaknesses.map((weakness, i) => (
-                <motion.li
-                  key={`weakness-${i}`}
-                  initial={{ opacity: 0, x: -4 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ delay: i * 0.04 }}
-                  className="flex items-start gap-2 text-xs text-foreground/80"
-                >
-                  <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-destructive" aria-hidden />
-                  {weakness}
-                </motion.li>
-              ))}
-            </ul>
-          </div>
-        )}
+        <div className="grid gap-x-6 gap-y-5 sm:grid-cols-2">
+          <ListBlock
+            title="Strengths"
+            items={verdict.strengths}
+            empty="No strength was recorded."
+            tone="success"
+            limit={4}
+          />
+          <ListBlock
+            title="Concerns"
+            items={verdict.weaknesses}
+            empty="No concern was raised."
+            tone="warning"
+            limit={4}
+          />
+        </div>
 
         {verdict.evidenceNotes.length > 0 && (
-          <div>
-            <div className="mb-2 flex items-center justify-between gap-2">
-              <SectionHeading>Evidence supporting assessment</SectionHeading>
-              <span className="text-[10px] text-muted-foreground tabular-nums">
+          <div className="border-t border-border/70 pt-4">
+            <div className="flex items-baseline justify-between gap-2">
+              <Eyebrow>Evidence behind the assessment</Eyebrow>
+              <span className="text-[10px] tabular-nums text-muted-foreground">
                 {verifiedCount} verified · {missingCount} missing
               </span>
             </div>
-            <ul className="space-y-2">
+            <ul className="mt-2 divide-y divide-border/60">
               {verdict.evidenceNotes.map((note, i) => (
-                <li
-                  key={`evidence-${i}`}
-                  className="rounded-md border border-border/60 bg-background/40 px-2.5 py-2"
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <span className="text-xs font-medium">{note.claim}</span>
-                    <EvidenceStatusBadge status={note.status} />
+                <li key={`evidence-${i}`} className="flex items-start justify-between gap-3 py-2">
+                  <div className="min-w-0">
+                    <p className="text-[13px] font-medium">{note.claim}</p>
+                    {note.note && (
+                      <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
+                        {note.note}
+                      </p>
+                    )}
                   </div>
-                  {note.note && (
-                    <p className="mt-1 text-[11px] leading-snug text-muted-foreground">
-                      {note.note}
-                    </p>
-                  )}
+                  <EvidenceStatusBadge status={note.status} />
                 </li>
               ))}
             </ul>
@@ -556,32 +534,29 @@ export function AiVerdictPanel({ verdict, title = "AI Verdict", className }: AiV
         )}
 
         {verdict.judgeAttentionAreas.length > 0 && (
-          <div>
-            <SectionHeading className="mb-2">Recommended areas for judge attention</SectionHeading>
-            <ul className="space-y-1.5">
+          <div className="border-t border-border/70 pt-4">
+            <Eyebrow>Judge attention</Eyebrow>
+            <ul className="mt-2 space-y-1.5">
               {verdict.judgeAttentionAreas.map((area, i) => (
-                <motion.li
+                <li
                   key={`attention-${i}`}
-                  initial={{ opacity: 0, x: -4 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ delay: i * 0.04 }}
-                  className="flex items-start gap-2 text-xs text-foreground/80"
+                  className="flex gap-2 text-[13px] leading-relaxed text-foreground/90"
                 >
-                  <Lightbulb className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" aria-hidden />
-                  {area}
-                </motion.li>
+                  <Lightbulb className="mt-[3px] h-3.5 w-3.5 shrink-0 text-warning" aria-hidden />
+                  <span className="min-w-0">{area}</span>
+                </li>
               ))}
             </ul>
           </div>
         )}
 
-        <p className="flex items-start gap-1.5 text-[10px] leading-snug text-muted-foreground/70">
+        <p className="flex items-start gap-1.5 text-[11px] leading-relaxed text-muted-foreground">
           <Info className="mt-0.5 h-3 w-3 shrink-0" aria-hidden />
           AI analysis is derived from the submission fields. It surfaces gaps and inconsistencies to
-          guide your evaluation - the final score and recommendation are entirely your decision.
+          guide your evaluation — the final score and recommendation are your decision.
         </p>
-      </CardContent>
-    </Card>
+      </SurfaceBody>
+    </Surface>
   );
 }
 
@@ -590,7 +565,7 @@ function EvidenceStatusBadge({ status }: { status: EvidenceNote["status"] }) {
     return (
       <Badge
         variant="outline"
-        className="shrink-0 border-success/30 bg-success/10 text-[10px] font-normal text-success"
+        className="shrink-0 border-border text-[10px] font-normal text-success"
       >
         Verified
       </Badge>
@@ -600,7 +575,7 @@ function EvidenceStatusBadge({ status }: { status: EvidenceNote["status"] }) {
     return (
       <Badge
         variant="outline"
-        className="shrink-0 border-destructive/30 bg-destructive/10 text-[10px] font-normal text-destructive"
+        className="shrink-0 border-border text-[10px] font-normal text-destructive"
       >
         Missing
       </Badge>
@@ -609,7 +584,7 @@ function EvidenceStatusBadge({ status }: { status: EvidenceNote["status"] }) {
   return (
     <Badge
       variant="outline"
-      className="shrink-0 border-warning/30 bg-warning/10 text-[10px] font-normal text-warning"
+      className="shrink-0 border-border text-[10px] font-normal text-warning"
     >
       Unverified
     </Badge>
@@ -626,15 +601,12 @@ export function AiVerdictCompact({
 }) {
   const confidenceMeta = CONFIDENCE_META[verdict.confidence];
   return (
-    <div
-      className={cn("rounded-lg border border-primary/20 bg-primary/[0.04] px-3 py-2.5", className)}
-    >
+    <div className={cn("rounded-lg border border-border bg-card px-3 py-2.5", className)}>
       <div className="flex items-center gap-2">
-        <Bot className="h-3.5 w-3.5 text-primary/70" aria-hidden />
-        <span className="text-xs font-medium">AI Pre-Assessment</span>
+        <span className="text-xs font-medium text-muted-foreground">AI pre-assessment</span>
         <Badge
           variant="outline"
-          className={cn("ml-auto text-[10px] font-normal", confidenceMeta.className)}
+          className={cn("ml-auto text-[10px] font-normal", confidenceMeta.textClass)}
         >
           {confidenceMeta.label}
         </Badge>

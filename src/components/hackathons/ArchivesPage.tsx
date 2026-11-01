@@ -14,6 +14,8 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { GlassFolder, type FolderFile } from "@/components/ui/glass-folder-cards";
+import { RealHackathonsPanel } from "./RealHackathonsPanel";
+import { UnassignedSubmissionsPanel } from "./UnassignedSubmissionsPanel";
 import { notify } from "@/lib/toast-messages";
 import { cn } from "@/lib/utils";
 import {
@@ -260,6 +262,12 @@ export function ArchivesPage() {
         </Dialog>
       }
     >
+      {/* Real events first: these are the ones a candidate can join. */}
+      <RealHackathonsPanel />
+
+      {/* Projects submitted without a code, waiting for an event. */}
+      <UnassignedSubmissionsPanel />
+
       <div className="grid items-start gap-x-10 gap-y-14 sm:grid-cols-2 xl:grid-cols-3">
         {HACKATHONS.map((archive) => (
           <FolderCell

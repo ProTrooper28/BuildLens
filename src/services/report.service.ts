@@ -79,7 +79,8 @@ export async function getReport(id: string): Promise<Report | null> {
 export async function createReport(input: ReportInsert): Promise<Report> {
   const supabase = getSupabase();
   const { data, error } = await supabase.from("reports").insert(input).select("*").single();
-  if (error) throw new Error(toAuthMessage(error));
+  // Keep the raw PostgREST error available for logging (see createProject).
+  if (error) throw new Error(toAuthMessage(error), { cause: error });
   return data;
 }
 
@@ -118,5 +119,5 @@ export async function updateReport(id: string, patch: ReportUpdate): Promise<Rep
 export async function deleteReport(id: string): Promise<void> {
   const supabase = getSupabase();
   const { error } = await supabase.from("reports").delete().eq("id", id);
-  if (error) throw new Error(toAuthMessage(error));
+  if (error) throw new Error(toAuthMessage(error), { cause: error });
 }

@@ -19,11 +19,11 @@ import {
   compareClaims,
   isCandidateMetadata,
   type ClaimInput,
+  type ClaimCheck,
 } from "@/services/evidence";
 import { extractDocumentClaims } from "@/services/document";
 import type { IngestionOutcome } from "@/services/ingestion/types";
 import { buildInspectionReport } from "@/services/inspection";
-import { buildFindings } from "@/services/inspection/findings";
 import type { ProjectDetail } from "@/types/evaluation";
 
 /* --------------------------------------------------------------- fixtures */
@@ -49,11 +49,7 @@ const vueRepository: IngestionOutcome = {
   text: "Repository: codexcapsules/extension",
   observations: [],
   segments: [
-    {
-      ref: "GitHub: package.json",
-      kind: "config",
-      text: "dependencies: vue, vite, vitest",
-    },
+    { ref: "GitHub: package.json", kind: "config", text: "dependencies: vue, vite, vitest" },
     {
       ref: "GitHub: src/background.ts",
       kind: "implementation",
@@ -123,13 +119,9 @@ describe("candidate metadata is not a claim", () => {
       ...claims.features,
       ...claims.technology,
       ...claims.impact,
-    ];
-    expect(all.join(" | ")).not.toMatch(/176743/);
-    expect(all.join(" | ")).not.toMatch(/CodeXCapsules/);
-    expect(all.join(" | ")).not.toMatch(/HACKATHON/);
-    expect(all.join(" | ")).not.toMatch(/GOES TO/);
-    expect(all.join(" | ")).not.toMatch(/SENDS/);
-    expect(all.join(" | ")).toMatch(/Browser Extension/);
+    ].join(" | ");
+    expect(all).not.toMatch(/176743|CodeXCapsules|HACKATHON|GOES TO|SENDS/);
+    expect(all).toMatch(/Browser Extension/);
   });
 
   it("reports candidate-provided facts separately and keeps junk out of the claims", () => {
@@ -208,63 +200,61 @@ describe("judge attention is grouped and risk-based", () => {
           impact: ["90% faster processing"],
           method: "heuristic",
         },
+        pages: [{ page: 1, text: DECK_TEXT }],
       },
     },
     [vueRepository],
   );
 
-  it("collapses many unverified claims into one finding", () => {
-    const findings = buildAttendance(bundle);
-    const claimFindings = findings.filter((entry) => entry.area === "claims");
-    expect(claimFindings.length).toBeLessThanOrEqual(3);
-    expect(claimFindings.some((entry) => entry.count >= 3)).toBe(true);
-    // No finding per sentence: the count is grouped, not duplicated.
-    expect(claimFindings.filter((entry) => entry.title.includes("could not be verified")).length).toBe(1);
+  const report = buildInspectionReport({ detail: project, bundle, evaluation: null });
+
+  it("collapses many missing claims into one concern", () => {
+    const claimConcerns = report.verdict.keyConcerns.filter(
+      (concern) =>
+        /could not be verified|could not be found|without a supporting figure/i.test(concern.text),
+    );
+    expect(claimConcerns.length).toBeLessThanOrEqual(3);
+    // Grouped, with a count — not one concern per claim.
+    expect(claimConcerns.some((concern) => /\d+ (claimed feature|claim)/i.test(concern.text))).toBe(
+      true,
+    );
   });
 
-  it("keeps documentation out of judge attention", () => {
-    const findings = buildAttendance(bundle);
-    expect(findings.some((entry) => entry.area === "documentation")).toBe(false);
-    expect(findings.every((entry) => entry.severity !== "low")).toBe(true);
+  it("never turns metadata into a concern", () => {
+    const text = report.verdict.keyConcerns.map((concern) => concern.text).join(" | ");
+    expect(text).not.toMatch(/176743|CodeXCapsules|GOES TO|HACKATHON/);
+    expect(report.verdict.claimed.join(" | ")).not.toMatch(/176743|GOES TO/);
+  });
+
+  it("surfaces candidate-provided facts on the verdict, unverified", () => {
+    expect(report.verdict.candidateProvided.some((fact) => fact.label === "Team ID")).toBe(true);
   });
 });
 
-function buildAttendance(bundle: ReturnType<typeof buildEvidenceBundle>) {
-  return buildFindings({ bundle, deployment: null, type: "browser_extension" }).filter(
-    (finding) => finding.severity === "critical" || finding.severity === "high" || finding.severity === "medium",
-  );
-}
+/* ------------------------------------------------------------ claim shape */
 
-/* ------------------------------------------------------------ report shape */
-
-describe("report exposes the claim table and candidate facts", () => {
-  it("carries source, per-source evidence and verdict for every claim", () => {
+describe("claims carry their source and per-source evidence", () => {
+  it("keeps the slide a claim was found on", () => {
     const bundle = buildEvidenceBundle(
       {
         name: "CodeXCapsules",
         presentation: {
           name: "deck.pptx",
           text: DECK_TEXT,
-          claims: { features: ["Browser Extension", "Local CV"], method: "heuristic" },
+          claims: { features: ["Browser Extension"], method: "heuristic" },
           pages: [
-            { page: 1, text: "SMART INDIA HACKATHON 2026\nTeam ID - 176743" },
+            { page: 1, text: "Team ID - 176743" },
             { page: 4, text: "Features\nBrowser Extension" },
-            { page: 5, text: "Features\nLocal CV" },
           ],
         },
       },
       [vueRepository],
     );
 
-    const report = buildInspectionReport({ detail: project, bundle, evaluation: null });
-    const rows = report.verdict.claimsTable;
-    expect(rows.length).toBe(2);
-    expect(rows.every((row) => row.source.includes("Candidate deck"))).toBe(true);
-    expect(rows.every((row) => row.verdictLabel.length > 0)).toBe(true);
-    expect(rows.every((row) => Array.isArray(row.missingEvidence))).toBe(true);
-
-    // Team metadata is reported, never scored as a claim.
-    expect(report.verdict.claimsTable.some((row) => /176743/.test(row.claim))).toBe(false);
-    expect(report.verdict.candidateProvided.some((fact) => fact.label === "Team ID")).toBe(true);
+    const claimEntry = bundle.claims.find(
+      (entry: ClaimCheck) => entry.claim === "Browser Extension",
+    );
+    expect(claimEntry?.pageRefs).toContain(4);
+    expect(claimEntry?.sourceRef).toContain("Candidate deck");
   });
 });

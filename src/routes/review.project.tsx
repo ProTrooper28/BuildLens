@@ -1,7 +1,7 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { motion } from "framer-motion";
-import { AlertCircle, CheckCircle2, Globe, UserRound } from "lucide-react";
+import { AlertCircle, CheckCircle2, Globe, Loader2, Ticket, UserRound } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -16,9 +16,20 @@ import { EASE_OUT } from "@/components/motion/primitives";
 import { SubmitButton, type SubmitButtonState } from "@/components/ui/submit-button";
 import { MovingBorder } from "@/components/ui/moving-border";
 import { useAuth } from "@/hooks/useAuth";
-import { createProjectForUser } from "@/services/project.service";
-import { createReportForUser } from "@/services/report.service";
-import { createGuestProject, createGuestReport } from "@/services/guest.service";
+import {
+  findHackathonByCode,
+  portalCandidateId,
+  syncSubmissionProgress,
+} from "@/services/hackathon.service";
+import {
+  createProjectSubmission,
+  databaseSubmissionStore,
+  describeSubmissionFailure,
+  guestSubmissionStore,
+  type SubmissionDraft,
+  type SubmissionStore,
+} from "@/services/submission.service";
+import type { Hackathon } from "@/types/hackathon";
 import {
   analyzeDocumentFile,
   documentAnalysisPayloadOf,
@@ -79,6 +90,17 @@ function FieldError({ id, children }: { id: string; children: ReactNode }) {
 function ReviewProject() {
   const navigate = useNavigate();
   const [name, setName] = useState("");
+  // Submitted to the hackathon as `team_members`; optional for solo entries.
+  const [members, setMembers] = useState("");
+  // The team's own name; falls back to the project name when left empty.
+  const [teamName, setTeamName] = useState("");
+  // Optional: with a code the project is filed under that hackathon; without
+  // one it waits as an unassigned submission for an organizer to file it.
+  const [joinCode, setJoinCode] = useState("");
+  const [codeTouched, setCodeTouched] = useState(false);
+  const [joining, setJoining] = useState(false);
+  const [hackathon, setHackathon] = useState<Hackathon | null>(null);
+  const [codeError, setCodeError] = useState<string | null>(null);
   const [repo, setRepo] = useState("");
   const [live, setLive] = useState("");
   const [notes, setNotes] = useState("");
@@ -94,7 +116,7 @@ function ReviewProject() {
   const errorResetTimer = useRef<number | null>(null);
   const busy = submitState === "submitting" || submitState === "processing";
 
-  const { user, isGuest, isLoading: authLoading } = useAuth();
+  const { user, isGuest, role, isLoading: authLoading } = useAuth();
 
   const repoValid = validateUrl(repo);
   const liveValid = validateUrl(live);
@@ -109,6 +131,7 @@ function ReviewProject() {
   void videoReady; // optional upload; tracked for future use
 
   // Guests may submit without an account; signed-in users need a session.
+  // The hackathon code is deliberately absent: it is optional and never blocks.
   const canSubmit = useMemo(
     () => nameValid && repoValid && liveValid && deckReady && (isGuest || !!user),
     [nameValid, repoValid, liveValid, deckReady, isGuest, user],
@@ -120,9 +143,58 @@ function ReviewProject() {
     { key: "deck", met: deckReady, text: "Presentation uploaded" },
   ] as const;
 
+  /** `Ada Lovelace, Grace Hopper` → `["Ada Lovelace", "Grace Hopper"]`. */
+  const teamMembers = members
+    .split(",")
+    .map((member) => member.trim())
+    .filter(Boolean)
+    .slice(0, 12);
+
   const attachments: Attachment[] = deckFile
     ? [{ name: deckFile.name, size: deckFile.size, type: deckFile.type }]
     : [];
+
+  /**
+   * Resolve a typed code to the hackathon candidates submit to.
+   *
+   * An unknown code is a warning, never a blocker: the project is still
+   * submitted (as unassigned) and an organizer can file it later, which is far
+   * better than losing a finished project because of a typo in a code.
+   */
+  const resolveCode = async (raw: string): Promise<Hackathon | null> => {
+    const code = raw.trim();
+    if (!code) {
+      setHackathon(null);
+      setCodeError(null);
+      return null;
+    }
+    if (code.length < 3) {
+      setHackathon(null);
+      setCodeError("Enter the full hackathon code, or leave it empty.");
+      return null;
+    }
+    setJoining(true);
+    try {
+      const found = await findHackathonByCode(code, user?.id ?? null);
+      setHackathon(found);
+      setCodeError(
+        found
+          ? null
+          : "No hackathon found for this code. You can remove the code and submit without a hackathon, or check the code.",
+      );
+      return found;
+    } catch (error) {
+      setHackathon(null);
+      setCodeError(
+        error instanceof Error
+          ? error.message
+          : "Could not check that code. You can still submit without one.",
+      );
+      return null;
+    } finally {
+      setJoining(false);
+    }
+  };
 
   /**
    * Read the uploaded deck and extract the team's claims.
@@ -210,6 +282,8 @@ function ReviewProject() {
    */
   const startAnalysis = ({
     isGuestSubmission,
+    hackathonSubmissionId,
+    candidateId,
     ...submission
   }: {
     projectId: string;
@@ -221,6 +295,9 @@ function ReviewProject() {
     createdAt: string;
     isGuestSubmission: boolean;
     document: DocumentAnalysis | null;
+    /** Set when the project was submitted to a hackathon. */
+    hackathonSubmissionId?: string | null;
+    candidateId?: string | null;
   }) => {
     const input: AnalysisInput = { ...submission, attachments };
     const run = startProjectAnalysis(
@@ -235,6 +312,15 @@ function ReviewProject() {
         "The project and report were kept — open the report to retry.",
       );
     });
+    // The candidate's status page follows the same analysis: in progress now,
+    // complete when the run settles. Bookkeeping only — never blocks the run.
+    if (run && hackathonSubmissionId && candidateId) {
+      void run
+        .then(() =>
+          syncSubmissionProgress(hackathonSubmissionId, candidateId, { status: "analyzed" }),
+        )
+        .catch(() => undefined);
+    }
   };
 
   /**
@@ -242,11 +328,22 @@ function ReviewProject() {
    * The analysis itself runs there, so this button never claims the evaluation
    * has finished when only the submission has.
    */
-  const finishSubmission = (projectId: string, reportId: string, projectName: string) => {
+  const finishSubmission = (
+    projectId: string,
+    reportId: string,
+    projectName: string,
+    hackathonSubmissionId: string | null,
+  ) => {
     setSubmitState("success");
     notify.success("Project submitted", `${projectName} is queued for investigation.`);
     window.setTimeout(() => {
-      navigate({ to: "/progress", search: { projectId, reportId } });
+      // The candidate sees a short confirmation — the judge-side analysis stays in
+      // the portal. Without a submission row there is no portal record to open.
+      if (hackathonSubmissionId) {
+        navigate({ to: "/submission/$id", params: { id: hackathonSubmissionId } });
+      } else {
+        navigate({ to: "/progress", search: { projectId, reportId } });
+      }
     }, 400);
   };
 
@@ -278,79 +375,96 @@ function ReviewProject() {
     }
 
     try {
-      // Guest submissions never reach Supabase (no session ⇒ no user id); they are
-      // stored in this browser and rendered by the same pages as real rows.
-      if (isGuest || !user) {
-        const project = createGuestProject({
-          name: name.trim(),
-          repo_url: repo.trim() || null,
-          website_url: live.trim() || null,
-          description: notes.trim() || null,
-        });
-        const report = createGuestReport({
-          type: "Project",
-          name: project.name,
-          project_id: project.id,
-          status: "In Progress",
-          report_data: reportData,
-        });
-
-        // The guest report stays in this browser; the pipeline updates it through
-        // the guest adapter and never touches Supabase.
-        startAnalysis({
-          projectId: project.id,
-          reportId: report.id,
-          name: project.name,
-          repoUrl: project.repo_url,
-          websiteUrl: project.website_url,
-          notes: project.description,
-          createdAt: report.created_at,
-          isGuestSubmission: true,
-          document: docAnalysisRef.current,
-        });
-
-        window.clearTimeout(stageTimer);
-        finishSubmission(project.id, report.id, project.name);
-        return;
+      // Resolve the hackathon if a code was typed. An unknown code never blocks
+      // the submission: the project is filed unassigned and the judges can attach
+      // it to an event once the team confirms which one it was.
+      let target: Hackathon | null = null;
+      if (joinCode.trim()) {
+        target =
+          hackathon && hackathon.code.toUpperCase() === joinCode.trim().toUpperCase()
+            ? hackathon
+            : await resolveCode(joinCode);
+        if (!target) {
+          setCodeTouched(true);
+          notify.info(
+            "Submitting as an unassigned project",
+            "No hackathon matched that code, so the judges can file it for you later.",
+          );
+        }
       }
 
-      const project = await createProjectForUser(user.id, {
-        name: name.trim(),
-        repo_url: repo.trim() || null,
-        website_url: live.trim() || null,
+      // Guests have no database session, so their rows are written to this
+      // browser by the guest store and rendered by the same pages as real ones.
+      const guestSubmission = isGuest || !user;
+
+      // Tag the project row by the *workflow* that created it. Candidates and
+      // guests always file a submission; a manager only files when they typed a
+      // code. That keeps managed work out of the judge queue and candidate
+      // submissions out of the Projects listing.
+      const fileSubmission = guestSubmission
+        ? true
+        : role !== "manager" || joinCode.trim().length > 0;
+
+      const draft: SubmissionDraft = {
+        candidateId: portalCandidateId(user?.id ?? null, guestSubmission),
+        hackathon: target,
+        projectName: name.trim(),
+        teamName: teamName.trim() || name.trim(),
+        teamMembers,
         description: notes.trim() || null,
-        status: "draft",
-      });
+        repoUrl: repo.trim() || null,
+        websiteUrl: live.trim() || null,
+        deckName: deckFile?.name ?? null,
+        reportData,
+      };
 
-      // The investigation produces a report for this project; create it through the
-      // report service so /progress can carry its real id on to /report/$id.
-      const report = await createReportForUser(user.id, {
-        type: "Project",
-        name: project.name,
-        project_id: project.id,
-        status: "In Progress",
-        report_data: reportData,
-      });
+      const store: SubmissionStore =
+        !user || isGuest
+          ? guestSubmissionStore()
+          : databaseSubmissionStore(user.id, {
+              source: fileSubmission ? "candidate_submission" : "project_manager",
+            });
 
+      // One call owns the write order (project → report → submission → progress),
+      // reuses the submission this candidate already filed on a retry, and removes
+      // anything it created when a later step fails.
+      const outcome = await createProjectSubmission(store, draft, { fileSubmission });
+
+      // The analysis runs on the report that exists now; it is never awaited, so
+      // a slow repository cannot fail a stored submission.
       startAnalysis({
-        projectId: project.id,
-        reportId: report.id,
-        name: project.name,
-        repoUrl: project.repo_url,
-        websiteUrl: project.website_url,
-        notes: project.description,
-        createdAt: report.created_at,
-        isGuestSubmission: false,
+        projectId: outcome.projectId,
+        reportId: outcome.reportId,
+        name: outcome.projectName,
+        repoUrl: draft.repoUrl,
+        websiteUrl: draft.websiteUrl,
+        notes: draft.description,
+        createdAt: outcome.reportCreatedAt,
+        isGuestSubmission: guestSubmission,
         document: docAnalysisRef.current,
+        hackathonSubmissionId: outcome.submissionId,
+        candidateId: outcome.submissionId ? draft.candidateId : null,
       });
 
       window.clearTimeout(stageTimer);
-      finishSubmission(project.id, report.id, project.name);
+      finishSubmission(
+        outcome.projectId,
+        outcome.reportId,
+        outcome.projectName,
+        outcome.submissionId,
+      );
     } catch (error) {
       window.clearTimeout(stageTimer);
-      console.error(error);
+      // The service logs the real failure (step, SQLSTATE/HTTP code, message,
+      // detail, hint, original error). The candidate sees what they can act on —
+      // plus the raw detail while developing, so it is never hidden behind
+      // "Submission failed".
+      const failure = describeSubmissionFailure(error);
       setSubmitState("error");
-      notify.error("Submission failed", "We couldn't create this project review.");
+      notify.error(
+        "Submission failed",
+        failure.diagnostic ? `${failure.message} ${failure.diagnostic}` : failure.message,
+      );
       // Return to the idle label so the action stays available for a retry.
       errorResetTimer.current = window.setTimeout(() => {
         setSubmitState("idle");
@@ -418,6 +532,65 @@ function ReviewProject() {
           )
         )}
         <div className="space-y-7">
+          {/* Hackathon — optional. A code files the project under that event; an
+              empty field files it as unassigned for the judge portal to place. */}
+          <div className="space-y-2">
+            <Label htmlFor="hackathonCode">
+              Hackathon code <span className="font-normal text-muted-foreground">(optional)</span>
+            </Label>
+            <div className="relative">
+              <Ticket
+                className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground"
+                aria-hidden
+              />
+              <Input
+                id="hackathonCode"
+                value={joinCode}
+                placeholder="Enter a hackathon code if you have one"
+                autoComplete="off"
+                spellCheck={false}
+                onChange={(event) => {
+                  setJoinCode(event.target.value.toUpperCase());
+                  setHackathon(null);
+                  setCodeError(null);
+                }}
+                onBlur={() => {
+                  setCodeTouched(true);
+                  void resolveCode(joinCode);
+                }}
+                aria-describedby="hackathonCode-help"
+                className={`pl-9 pr-9 ${codeTouched && codeError ? "border-warning/60 focus-visible:ring-warning/40" : hackathon ? "border-success/50" : ""}`}
+              />
+              {joining ? (
+                <Loader2
+                  className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-muted-foreground"
+                  aria-hidden
+                />
+              ) : hackathon ? (
+                <CheckCircle2
+                  className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-success"
+                  aria-hidden
+                />
+              ) : null}
+            </div>
+            {codeTouched && codeError ? (
+              <p id="hackathonCode-err" className="flex items-start gap-1.5 text-xs text-warning">
+                <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+                {codeError}
+              </p>
+            ) : hackathon ? (
+              <p className="text-xs text-success">
+                Linked to {hackathon.name} · <span className="font-mono">{hackathon.code}</span>
+              </p>
+            ) : (
+              <p id="hackathonCode-help" className="text-xs text-muted-foreground">
+                Optional. With a code the project goes straight into that hackathon&apos;s judge
+                queue; without one it is submitted as <strong>unassigned</strong> and an organiser
+                can add it to a hackathon later. Either way your submission is saved.
+              </p>
+            )}
+          </div>
+
           {/* Name */}
           <div className="space-y-2">
             <Label htmlFor="pname">
@@ -439,6 +612,40 @@ function ReviewProject() {
             {showNameError && (
               <FieldError id="pname-err">Please give the project a name.</FieldError>
             )}
+          </div>
+
+          {/* Team name */}
+          <div className="space-y-2">
+            <Label htmlFor="pteamname">
+              Team name <span className="font-normal text-muted-foreground">(optional)</span>
+            </Label>
+            <Input
+              id="pteamname"
+              value={teamName}
+              placeholder="Team Alpha"
+              onChange={(event) => setTeamName(event.target.value)}
+              aria-describedby="pteamname-help"
+            />
+            <p id="pteamname-help" className="text-xs text-muted-foreground">
+              Shown to the judges next to your project. Defaults to the project name.
+            </p>
+          </div>
+
+          {/* Team members */}
+          <div className="space-y-2">
+            <Label htmlFor="pteam">
+              Team members <span className="font-normal text-muted-foreground">(optional)</span>
+            </Label>
+            <Input
+              id="pteam"
+              value={members}
+              placeholder="Ada Lovelace, Grace Hopper"
+              onChange={(event) => setMembers(event.target.value)}
+              aria-describedby="pteam-help"
+            />
+            <p id="pteam-help" className="text-xs text-muted-foreground">
+              Comma separated. Shown to the judges alongside the project.
+            </p>
           </div>
 
           {/* URLs */}

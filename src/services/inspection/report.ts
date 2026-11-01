@@ -10,36 +10,52 @@
  *   • “could not verify” never becomes a negative statement;
  *   • the README/deck never verifies itself — claims are checked by the bundle’s
  *     deterministic comparison;
- *   • no score is invented: automated scores appear only when the model ran.
+ *   • no score is invented: the overall score is computed from the evidence by
+ *     `services/verification/score`, and the model’s own score is kept apart
+ *     from it.
  */
 
 import type { StructuredEvaluation } from "@/services/evaluation-agent/schema";
-import { candidateFactsFrom } from "@/services/evidence/classify";
+import type { SecurityFinding } from "@/services/verification/types";
 import {
-  CLAIM_SOURCE_FINDING_LABELS,
   CLAIM_STATUS_LABELS,
-  CLAIM_TYPE_LABELS,
-  CLAIM_VERDICT_LABELS,
-  claimVerdictCounts,
-  verdictOf,
   type ClaimCheck,
-  type ClaimSourceFinding,
+  type ClaimEvidenceStatus,
   type EvidenceBundle,
   type EvidenceObservation,
+  type EvidenceSourceKind,
   type EvidenceSourceReport,
   type ObservationArea,
 } from "@/services/evidence/types";
-import { claimTypeOf } from "@/services/evidence/classify";
-import { attentionFindings, buildFindings, severityCounts } from "./findings";
-import type {
-  ClaimVerificationRow,
-  DeploymentRowId,
-  DeploymentInspection,
-  DeploymentRow,
-  EvidenceDimension,
-  Finding,
+import { candidateFactsFrom } from "@/services/evidence/classify";
+import {
+  DEPLOYMENT_AREA_IDS,
+  DEPLOYMENT_AREA_LABELS,
+  type ClaimCrossCheck,
+  type DeploymentArea,
+  type DeploymentAreaId,
+  type DeploymentBasis,
+  type DeploymentCheck,
+  type DeploymentHttp,
+  type DeploymentInspection,
+  type DeploymentRow,
+  type DeploymentRowId,
 } from "./types";
 import type { ProjectDetail } from "@/types/evaluation";
+import { buildFeatureVerification, featureCounts } from "@/services/verification/features";
+import { assessDocumentMismatch, MISMATCH_LEVEL_LABELS } from "@/services/verification/mismatch";
+import { assessSecurity } from "@/services/verification/security";
+import { scoreBand, scoreEvaluation } from "@/services/verification/score";
+import {
+  SEVERITY_LABELS,
+  SEVERITY_ORDER,
+  VERIFICATION_RESULT_LABELS,
+  type DocumentMismatch,
+  type FeatureVerification,
+  type ScoreBreakdown,
+  type SecurityAssessment,
+  type Severity,
+} from "@/services/verification/types";
 import { detectProjectType, requiredInputs } from "./project-type";
 import {
   CHECK_STATUS_LABELS,
@@ -54,6 +70,7 @@ import {
   type InspectionReport,
   type InspectionSection,
   type InspectionSectionId,
+  type JudgeConcern,
   type JudgeVerdict,
   type ProjectType,
   type VerdictTone,
@@ -124,7 +141,8 @@ function aggregateStatus(checks: readonly InspectionCheck[]): CheckStatus {
     return "warning";
   }
   if (checks.every((check) => check.status === "could_not_verify")) return "could_not_verify";
-  if (checks.some((check) => check.status === "good" || check.status === "supported")) return "good";
+  if (checks.some((check) => check.status === "good" || check.status === "supported"))
+    return "good";
   return "info";
 }
 
@@ -161,6 +179,88 @@ function sectionOf(
   };
 }
 
+/** Source families shown in the per-claim cross-check (Priority 4 §6). */
+const CROSS_SOURCE_LABEL: Partial<Record<EvidenceSourceKind, string>> = {
+  website: "Deployment",
+  repository: "Repository",
+  document: "Document",
+};
+
+/** Evidence reference prefixes, so a cross-check can cite the exact location. */
+const CROSS_REF_PREFIX: Partial<Record<EvidenceSourceKind, string>> = {
+  website: "Deployed page:",
+  repository: "GitHub:",
+};
+
+/**
+ * Which part of the evidence carried a claim, and which part could not be read.
+ *
+ * This restates the comparison's own result per source — it never upgrades a
+ * claim: a source that was not read stays “could not verify” even when the claim
+ * is supported somewhere else, and a source that was read without a match says
+ * so instead of implying the claim is false.
+ */
+function crossChecksFor(
+  claim: ClaimCheck,
+  sources: readonly EvidenceSourceReport[],
+): ClaimCrossCheck[] {
+  const supported = claim.status === "supported" || claim.status === "partially_supported";
+
+  return sources
+    .filter((source) => CROSS_SOURCE_LABEL[source.kind] !== undefined)
+    .map((source) => {
+      const label = CROSS_SOURCE_LABEL[source.kind] ?? source.label;
+      const prefix = CROSS_REF_PREFIX[source.kind];
+      const refs = prefix ? (claim.evidenceRefs ?? []).filter((ref) => ref.startsWith(prefix)) : [];
+
+      if (!source.readable) {
+        return {
+          source: label,
+          status: "could_not_verify" as ClaimEvidenceStatus,
+          detail: `${source.label} could not be read, so this source was not checked.`,
+        };
+      }
+      // A deck claim is not verified by the deck: the deck is where the team
+      // said it. Saying so is clearer than reporting a comparison that never ran.
+      if (source.kind === "document" && claim.id.startsWith("deck.")) {
+        return {
+          source: label,
+          status: "could_not_verify" as ClaimEvidenceStatus,
+          detail:
+            "The deck is where this claim came from, so it does not count as proof — it is checked against the code and the live app.",
+        };
+      }
+      if (supported && claim.sources.includes(source.kind)) {
+        return {
+          source: label,
+          status: "supported" as ClaimEvidenceStatus,
+          detail: refs[0]
+            ? `Matching evidence found: ${refs[0]}`
+            : `${source.label} carries evidence for this claim.`,
+        };
+      }
+      if (claim.status === "not_found") {
+        return {
+          source: label,
+          status: "not_found" as ClaimEvidenceStatus,
+          detail: `${source.label} was read and did not show this claim.`,
+        };
+      }
+      if (claim.status === "could_not_verify") {
+        return {
+          source: label,
+          status: "could_not_verify" as ClaimEvidenceStatus,
+          detail: `This claim could not be checked against ${source.label.toLowerCase()}.`,
+        };
+      }
+      return {
+        source: label,
+        status: "not_found" as ClaimEvidenceStatus,
+        detail: `No matching evidence for this claim in ${source.label}.`,
+      };
+    });
+}
+
 function claimChecks(bundle: EvidenceBundle | null): InspectionCheck[] {
   if (!bundle) return [];
   return bundle.claims.map((claim) => {
@@ -189,13 +289,18 @@ function claimChecks(bundle: EvidenceBundle | null): InspectionCheck[] {
         claim.status === "could_not_verify" ? "low" : claim.quotes.length > 0 ? "high" : "medium",
       ...(claim.kind ? { claimKind: claim.kind } : {}),
       ...(refs.length > 0 ? { pageRefs: refs } : {}),
+      crossChecks: crossChecksFor(claim, bundle.sources),
     };
   });
 }
 
 /* ----------------------------------------------------------------- sections */
 
-function documentSection(detail: ProjectDetail, bundle: EvidenceBundle | null): InspectionSection {
+function documentSection(
+  detail: ProjectDetail,
+  bundle: EvidenceBundle | null,
+  mismatch: DocumentMismatch,
+): InspectionSection {
   const source = bundle?.sources.find((entry) => entry.kind === "document") ?? null;
   const pages = detail.presentationPages ?? [];
   const deckClaims = (bundle?.claims ?? []).filter((claim) => claim.id.startsWith("deck."));
@@ -231,6 +336,21 @@ function documentSection(detail: ProjectDetail, bundle: EvidenceBundle | null): 
     status: "good",
     explanation: `${source.detail} The submitted deck is treated as the team's claims, never as proof.`,
     evidence: source.highlights.slice(0, 6),
+    confidence: "high",
+  });
+
+  checks.push({
+    id: "document.mismatch",
+    section: "document",
+    title: "Does the deck describe this project?",
+    result: MISMATCH_LEVEL_LABELS[mismatch.level],
+    status:
+      mismatch.level === "major" ? "critical" : mismatch.level === "possible" ? "warning" : "good",
+    explanation:
+      mismatch.level === "none"
+        ? mismatch.headline
+        : `${mismatch.headline} ${mismatch.signals.map((signal) => signal.detail).join(" ")}`,
+    evidence: [...mismatch.evidence, ...mismatch.signals.map((signal) => signal.label)].slice(0, 8),
     confidence: "high",
   });
 
@@ -281,7 +401,9 @@ function documentSection(detail: ProjectDetail, bundle: EvidenceBundle | null): 
       withPages.length > 0
         ? "Claims were located in the extracted page text, so the judge can open the referenced slide."
         : "This document's pages were not stored individually, so claims cannot be pinned to a slide number.",
-    evidence: withPages.map((claim) => `p.${(claim.pageRefs ?? []).join(", ")} — ${clip(claim.claim, 90)}`),
+    evidence: withPages.map(
+      (claim) => `p.${(claim.pageRefs ?? []).join(", ")} — ${clip(claim.claim, 90)}`,
+    ),
     confidence: withPages.length > 0 ? "high" : "low",
   });
 
@@ -292,7 +414,8 @@ function documentSection(detail: ProjectDetail, bundle: EvidenceBundle | null): 
       title: "Scanned pages / OCR",
       result: "OCR was used for at least part of the document",
       status: "info",
-      explanation: "Text on image-only pages was read with OCR, so it may contain recognition errors.",
+      explanation:
+        "Text on image-only pages was read with OCR, so it may contain recognition errors.",
       evidence: source.highlights.filter((highlight) => /ocr/i.test(highlight)).slice(0, 3),
       confidence: "medium",
     });
@@ -538,7 +661,8 @@ function aiSection(
       section: "ai",
       title: flag.label,
       result: `${flag.severity === "high" ? "High" : flag.severity === "medium" ? "Medium" : "Low"} severity`,
-      status: flag.severity === "high" ? "critical" : flag.severity === "medium" ? "warning" : "info",
+      status:
+        flag.severity === "high" ? "critical" : flag.severity === "medium" ? "warning" : "info",
       explanation: flag.detail,
       evidence: [],
       confidence: "medium",
@@ -593,7 +717,9 @@ function rubricSection(evaluation: StructuredEvaluation | null): InspectionSecti
     });
   }
 
-  const scored = checks.filter((check) => check.id.startsWith("rubric.") && check.result.includes("/100"));
+  const scored = checks.filter(
+    (check) => check.id.startsWith("rubric.") && check.result.includes("/100"),
+  );
   const average =
     scored.length > 0
       ? Math.round(
@@ -672,55 +798,35 @@ const TONE_LEAD: Record<VerdictTone, string> = {
   unverified: "Not enough inspectable evidence",
 };
 
-/**
- * Plain-language bullets for "What the judge should know".
- *
- * They summarise the risk picture rather than the evidence inventory: claim
- * verification first, then the single most serious finding, then the state of
- * the deployment and the repository. Grouped, never one line per claim.
- */
 function judgeBullets(input: {
   type: ProjectType;
   counts: ClaimCounts & { total: number };
-  verdictCounts: ReturnType<typeof claimVerdictCounts> & { total: number };
   checks: readonly InspectionCheck[];
   bundle: EvidenceBundle | null;
   detail: ProjectDetail;
   tone: VerdictTone;
   missingInputs: string[];
-  findings: readonly Finding[];
 }): string[] {
-  const { counts, verdictCounts, bundle, detail, tone, missingInputs, findings } = input;
+  const { counts, checks, bundle, detail, tone, missingInputs } = input;
   const bullets: string[] = [];
 
   if (counts.total > 0) {
-    const open =
-      verdictCounts.unverified + verdictCounts.unsupported + verdictCounts.contradicted;
-    const parts = [
-      `${verdictCounts.verified} of ${counts.total} claims verified`,
-      verdictCounts.partially_verified > 0 ? `${verdictCounts.partially_verified} partial` : null,
-      open > 0 ? `${open} unverified` : null,
-      verdictCounts.unsupported > 0 ? `${verdictCounts.unsupported} unsupported` : null,
-      verdictCounts.contradicted > 0 ? `${verdictCounts.contradicted} contradicted` : null,
-    ].filter(Boolean);
-    bullets.push(`${open === 0 ? "✓" : "⚠"} Claim verification: ${parts.join(" · ")}.`);
+    const unverified = counts.partially_supported + counts.not_found + counts.could_not_verify;
+    bullets.push(
+      unverified === 0
+        ? `✓ All ${counts.total} checked claims are backed by the evidence that was read.`
+        : `⚠ ${counts.supported} of ${counts.total} claims are fully supported; ${unverified} need${unverified === 1 ? "s" : ""} closer attention.`,
+    );
   } else {
     bullets.push("• No checkable claims were submitted, so claim verification could not run.");
-  }
-
-  const top = findings[0] ?? null;
-  if (top) {
-    const mark =
-      top.severity === "critical" ? "✕" : top.severity === "high" ? "⚠" : "•";
-    bullets.push(`${mark} ${clip(top.title, 120)} — ${clip(top.summary, 110)}`);
   }
 
   const site = bundle?.sources.find((source) => source.kind === "website") ?? null;
   if (detail.demoUrl) {
     bullets.push(
       site?.readable
-        ? "✓ The deployed application was reached and its public page inspected."
-        : "⚠ The submitted deployment could not be read, so live behaviour is unverified.",
+        ? `✓ The deployed application was reached and inspected.`
+        : `⚠ The submitted deployment could not be read, so live behaviour is unverified.`,
     );
   } else if (requiredInputs(input.type).website) {
     bullets.push("⚠ No deployed URL was submitted, so the live application is unverified.");
@@ -728,9 +834,28 @@ function judgeBullets(input: {
 
   const repo = bundle?.sources.find((source) => source.kind === "repository") ?? null;
   if (repo?.readable) {
-    bullets.push("✓ The repository was read, and its code and configuration are the implementation evidence.");
+    const tests = (repo.observations ?? []).find((entry) => entry.id === "repo.code.tests");
+    bullets.push(
+      tests?.status === "good"
+        ? "✓ The repository contains implementation evidence, including automated tests."
+        : "⚠ The repository was read, but no automated tests were found.",
+    );
   } else if (detail.repoUrl) {
     bullets.push("⚠ The repository could not be read, so implementation evidence is unverified.");
+  }
+
+  const critical = checks.filter((check) => check.status === "critical");
+  if (critical.length > 0) {
+    bullets.push(`✕ ${clip(critical[0]?.explanation ?? "A critical finding needs review.", 130)}`);
+  } else {
+    const security = checks.filter(
+      (check) => check.section === "security" && check.status === "warning",
+    );
+    bullets.push(
+      security.length > 0
+        ? `⚠ Security: ${clip(security[0]?.title ?? "one check", 60)} needs the judge's attention.`
+        : "✓ No critical security finding was detected in the public sources (server-side security was not tested).",
+    );
   }
 
   if (missingInputs.length > 0 && bullets.length < 5) {
@@ -742,151 +867,189 @@ function judgeBullets(input: {
   return bullets.slice(0, 5);
 }
 
+/** Which deployment area an observation belongs to. Non-web areas are ignored. */
+const DEPLOYMENT_AREA_OF: Record<ObservationArea, DeploymentAreaId | null> = {
+  accessibility: "availability",
+  functionality: "functionality",
+  performance: "performance",
+  security: "security",
+  ux: "responsiveness",
+  repository: null,
+  document: null,
+  evaluation: null,
+};
+
+const HTTP_STATUS_TEXT: Record<number, string> = {
+  200: "OK",
+  201: "Created",
+  204: "No content",
+  301: "Moved permanently",
+  302: "Found",
+  304: "Not modified",
+  307: "Temporary redirect",
+  308: "Permanent redirect",
+  400: "Bad request",
+  401: "Unauthorized",
+  403: "Forbidden",
+  404: "Not found",
+  405: "Method not allowed",
+  429: "Too many requests",
+  500: "Server error",
+  502: "Bad gateway",
+  503: "Service unavailable",
+  504: "Gateway timeout",
+};
+
+function httpText(status: number): string {
+  return `${status} ${HTTP_STATUS_TEXT[status] ?? "Response"}`;
+}
+
+/** How a finding was reached — never upgraded beyond what the reader did. */
+function deploymentBasis(status: CheckStatus): DeploymentBasis {
+  if (status === "not_detected" || status === "not_found") return "not_detected";
+  if (status === "could_not_verify") return "could_not_verify";
+  return "observed";
+}
+
+function deploymentAreaStatus(checks: DeploymentCheck[]): CheckStatus {
+  if (checks.length === 0) return "could_not_verify";
+  if (checks.some((check) => check.status === "critical")) return "critical";
+  if (checks.some((check) => check.status === "warning")) return "warning";
+  if (checks.some((check) => check.status === "good" || check.status === "supported")) {
+    return "good";
+  }
+  if (checks.every((check) => check.status === "could_not_verify")) return "could_not_verify";
+  return "not_detected";
+}
+
+function evidenceNumber(entry: EvidenceObservation, pattern: RegExp): number | null {
+  const match = pattern.exec(entry.evidence.join(" "));
+  return match?.[1] ? Number(match[1]) : null;
+}
+
 /**
- * Evidence-based dimension scores.
- *
- * A dimension is scored only when there is evidence to score it with, and every
- * score carries the reason it moved — the judge can see "why 6/10" instead of
- * trusting a number. No dimension is invented from a missing source.
+ * The short value shown beside a deployment check (“200 OK”, “420 ms”, “2 failed”).
+ * Each case reads a measurement the reader already recorded; the default falls
+ * back to the first sentence of the finding rather than inventing a value.
  */
-function buildDimensions(input: {
-  bundle: EvidenceBundle | null;
-  deployment: DeploymentInspection;
-  verdictCounts: ReturnType<typeof claimVerdictCounts> & { total: number };
-  findings: readonly Finding[];
-}): EvidenceDimension[] {
-  const { bundle, deployment, verdictCounts, findings } = input;
-  const observations = (bundle?.sources ?? []).flatMap((source) => source.observations ?? []);
-  const dimensions: EvidenceDimension[] = [];
-
-  if (verdictCounts.total > 0) {
-    const weighted =
-      verdictCounts.verified * 1 +
-      verdictCounts.partially_verified * 0.5 +
-      verdictCounts.unverified * 0.15 +
-      verdictCounts.unsupported * 0 +
-      verdictCounts.contradicted * 0;
-    const scored = verdictCounts.total - verdictCounts.unverified * 0.5;
-    dimensions.push({
-      id: "claims",
-      label: "Claim verification",
-      score: Math.max(0, Math.min(100, Math.round((weighted / Math.max(scored, 1)) * 100))),
-      reason: `${verdictCounts.verified} verified · ${verdictCounts.partially_verified} partial · ${verdictCounts.unverified} unverified · ${verdictCounts.unsupported} unsupported · ${verdictCounts.contradicted} contradicted.`,
-      section: "claims",
-    });
+function deploymentValue(entry: EvidenceObservation): string {
+  switch (entry.id) {
+    case "site.accessibility.reachable":
+      return entry.status === "good"
+        ? "Online"
+        : entry.status === "critical"
+          ? "Server error"
+          : "Error response";
+    case "site.accessibility.https":
+      return entry.status === "good"
+        ? "Enabled"
+        : entry.status === "critical"
+          ? "Plain HTTP"
+          : "Not checked";
+    case "site.accessibility.status": {
+      const status = evidenceNumber(entry, /HTTP (\d{3})/);
+      return status === null ? headlineOf(entry.result, 48) : httpText(status);
+    }
+    case "site.accessibility.redirects": {
+      const hops = Math.max(0, entry.evidence.length - 1);
+      return `${hops} redirect${hops === 1 ? "" : "s"}`;
+    }
+    case "site.performance.response": {
+      const ms = evidenceNumber(entry, /in (\d+)ms/);
+      return ms === null ? headlineOf(entry.result, 48) : `${ms} ms`;
+    }
+    case "site.performance.failed_resources":
+      return `${entry.evidence.length} failed`;
+    case "site.performance.large_assets":
+      return `${entry.evidence.length} large`;
+    case "site.performance.html_size": {
+      const bytes = evidenceNumber(entry, /^(\d+) bytes of HTML$/);
+      return bytes === null ? headlineOf(entry.result, 48) : `${Math.round(bytes / 1024)} KB`;
+    }
+    case "site.performance.assets":
+      return `${entry.evidence.length} sampled`;
+    case "site.performance.lighthouse":
+      return "Not run";
+    case "site.functionality.content":
+      return entry.status === "warning" ? "Needs review" : "Rendered content";
+    case "site.functionality.links": {
+      if (entry.status === "could_not_verify") return "Not checked";
+      const failed = entry.evidence.filter((line) => / — (?!2|3\d{2}\b)/.test(line)).length;
+      return failed === 0 ? "All responded" : `${failed} failed`;
+    }
+    case "site.functionality.interactions": {
+      const total = entry.evidence.reduce((sum, line) => {
+        const match = /: (\d+)$/.exec(line);
+        return sum + (match?.[1] ? Number(match[1]) : 0);
+      }, 0);
+      return `${total} control${total === 1 ? "" : "s"}`;
+    }
+    case "site.functionality.flows":
+      return "Not exercised";
+    case "site.functionality.auth":
+      return entry.status === "good" ? "Entry point found" : "Not visible";
+    case "site.security.headers": {
+      const missing = entry.evidence.filter((line) => /: not sent$/.test(line)).length;
+      const total = entry.evidence.length;
+      return `${total - missing} of ${total} present`;
+    }
+    case "site.security.mixed_content":
+      return entry.status === "not_detected" ? "Not detected" : `${entry.evidence.length} found`;
+    case "site.security.secrets":
+      return entry.status === "not_detected" ? "None detected" : `${entry.evidence.length} pattern`;
+    case "site.security.server_side":
+      return "Not tested";
+    case "site.ux.viewport":
+      return entry.status === "good" ? "Present" : "Missing";
+    case "site.ux.metadata":
+      return entry.status === "good" ? "Title + description" : "Incomplete";
+    case "site.ux.images":
+      return entry.status === "could_not_verify"
+        ? "No images"
+        : `${entry.evidence.length} without alt`;
+    case "site.ux.layout":
+      return "Not inspected";
+    default:
+      return headlineOf(entry.result, 48);
   }
+}
 
-  const security = observations.filter((observation) => observation.area === "security");
-  const securityMeasured = security.filter(
-    (observation) => observation.status === "good" || observation.status === "warning" || observation.status === "critical" || observation.status === "not_detected",
-  );
-  if (securityMeasured.length > 0) {
-    const critical = securityMeasured.filter((entry) => entry.status === "critical").length;
-    const warning = securityMeasured.filter((entry) => entry.status === "warning").length;
-    dimensions.push({
-      id: "security",
-      label: "Security",
-      score: Math.max(5, 100 - critical * 45 - warning * 15),
-      reason:
-        critical > 0
-          ? `${critical} critical and ${warning} warning security signal${warning === 1 ? "" : "s"} in the public sources.`
-          : warning > 0
-            ? `${warning} warning security signal${warning === 1 ? "" : "s"}; no critical exposure found in the public sources.`
-            : "No critical or warning security signal in the public sources. Server-side security was not tested.",
-      section: "security",
-    });
-  }
+/** The five areas, built straight from the observations the site reader recorded. */
+function deploymentAreas(observations: EvidenceObservation[]): DeploymentArea[] {
+  return DEPLOYMENT_AREA_IDS.map((id) => {
+    const checks: DeploymentCheck[] = observations
+      .filter((entry) => DEPLOYMENT_AREA_OF[entry.area] === id)
+      .map((entry) => ({
+        id: entry.id,
+        label: entry.label,
+        status: entry.status,
+        basis: deploymentBasis(entry.status),
+        value: deploymentValue(entry),
+        detail: entry.result,
+        evidence: entry.evidence,
+        confidence: entry.confidence,
+      }));
+    return { id, label: DEPLOYMENT_AREA_LABELS[id], status: deploymentAreaStatus(checks), checks };
+  }).filter((area) => area.checks.length > 0);
+}
 
-  const performance = observations.filter((observation) => observation.area === "performance");
-  const measuredPerformance = performance.filter(
-    (observation) => observation.status !== "could_not_verify" && observation.status !== "info",
-  );
-  if (measuredPerformance.length > 0) {
-    const warning = measuredPerformance.filter((entry) => entry.status === "warning").length;
-    const critical = measuredPerformance.filter((entry) => entry.status === "critical").length;
-    dimensions.push({
-      id: "performance",
-      label: "Performance",
-      score: Math.max(10, 100 - warning * 20 - critical * 40),
-      reason:
-        warning + critical > 0
-          ? `${warning + critical} measured value${warning + critical === 1 ? " is" : "s are"} outside the recommended range.`
-          : "Measured response and asset behaviour were within the recommended range.",
-      section: "performance",
-    });
-  }
+/** The HTTP facts behind the inspection — null where nothing was measured. */
+function deploymentHttp(site: EvidenceSourceReport | null): DeploymentHttp {
+  const observations = site?.observations ?? [];
+  const find = (id: string) => observations.find((entry) => entry.id === id) ?? null;
+  const statusObs = find("site.accessibility.status");
+  const httpsObs = find("site.accessibility.https");
+  const redirectObs = find("site.accessibility.redirects");
+  const finalUrlLine = httpsObs?.evidence.find((line) => line.startsWith("Final URL:"));
 
-  const functionality = observations.filter(
-    (observation) => observation.area === "functionality" || observation.area === "ux",
-  );
-  const measuredFunctionality = functionality.filter(
-    (observation) => observation.status !== "could_not_verify" && observation.status !== "info",
-  );
-  if (measuredFunctionality.length > 0) {
-    const negative = measuredFunctionality.filter(
-      (entry) => entry.status === "warning" || entry.status === "critical" || entry.status === "not_detected",
-    ).length;
-    dimensions.push({
-      id: "functionality",
-      label: "Functionality",
-      score: Math.max(15, 100 - negative * 25),
-      reason:
-        negative > 0
-          ? `${negative} of ${measuredFunctionality.length} observed functionality checks did not show the expected behaviour.`
-          : `${measuredFunctionality.length} observed functionality check${measuredFunctionality.length === 1 ? "" : "s"} showed the expected behaviour.`,
-      section: "functionality",
-    });
-  }
-
-  const quality = observations.find((observation) => observation.id === "repo.quality");
-  const qualityScore = quality?.result.match(/(\d{1,3})\/100/)?.[1];
-  if (qualityScore) {
-    dimensions.push({
-      id: "code",
-      label: "Code quality",
-      score: Number(qualityScore),
-      reason: clip(quality?.result ?? "", 140),
-      section: "repository",
-    });
-  }
-
-  const docs = observations.find((observation) => observation.id === "repo.code.docs");
-  if (docs) {
-    dimensions.push({
-      id: "documentation",
-      label: "Documentation",
-      score: docs.status === "good" ? 85 : docs.status === "warning" ? 40 : null,
-      reason: clip(docs.result, 140),
-      section: "repository",
-    });
-  }
-
-  if (deployment.applicable && deployment.rows.some((row) => row.status === "good")) {
-    dimensions.push({
-      id: "deployment",
-      label: "Deployment",
-      score: null,
-      reason: deployment.rows
-        .filter((row) => row.status !== "could_not_verify")
-        .map((row) => `${row.label}: ${row.value}`)
-        .join(" · "),
-      section: "deployment",
-    });
-  }
-
-  // Findings with no dimension of their own still explain the score picture.
-  const highFindings = findings.filter((entry) => entry.severity === "critical" || entry.severity === "high");
-  if (highFindings.length > 0 && dimensions.length === 0) {
-    dimensions.push({
-      id: "review",
-      label: "Review needed",
-      score: null,
-      reason: `${highFindings.length} finding${highFindings.length === 1 ? "" : "s"} need a judge's decision before scoring.`,
-      section: "claims",
-    });
-  }
-
-  return dimensions;
+  return {
+    status: statusObs ? evidenceNumber(statusObs, /HTTP (\d{3})/) : null,
+    finalUrl: finalUrlLine ? finalUrlLine.replace("Final URL:", "").trim() : (site?.url ?? null),
+    https: httpsObs ? httpsObs.status === "good" : null,
+    redirects: redirectObs ? Math.max(0, redirectObs.evidence.length - 1) : null,
+    redirectChain: redirectObs?.evidence ?? [],
+    responseMs: statusObs ? evidenceNumber(statusObs, /Total time (\d+)ms/) : null,
+  };
 }
 
 function buildDeployment(
@@ -894,73 +1057,221 @@ function buildDeployment(
   bundle: EvidenceBundle | null,
   type: ProjectType,
   generatedAt: string,
-): JudgeVerdict["deployment"] {
+): DeploymentInspection {
   const site = bundle?.sources.find((source) => source.kind === "website") ?? null;
   const needsSite = requiredInputs(type).website;
-  const httpsObs = site?.observations?.find((entry) => entry.id === "site.accessibility.https");
-  const statusObs = site?.observations?.find((entry) => entry.id === "site.accessibility.status");
-  const reachableObs = site?.observations?.find((entry) => entry.id === "site.accessibility.reachable");
-  const perfObs = site?.observations?.find((entry) => entry.area === "performance");
-  const secObs = site?.observations?.find((entry) => entry.area === "security");
-  const funcObs = site?.observations?.find((entry) => entry.area === "functionality");
-  const uxObs = site?.observations?.find((entry) => entry.area === "ux");
+  const observations = site?.observations ?? [];
+  const find = (id: string) => observations.find((entry) => entry.id === id) ?? null;
 
-  const row = (id: DeploymentRowId, label: string, status: CheckStatus, value: string, detail: string): DeploymentRow => ({ id, label, status, value, detail });
+  const httpsObs = find("site.accessibility.https");
+  const statusObs = find("site.accessibility.status");
+  const reachableObs = find("site.accessibility.reachable");
+  const secretsObs = find("site.security.secrets");
+  const headersObs = find("site.security.headers");
+  const linksObs = find("site.functionality.links");
+  const failedObs = find("site.performance.failed_resources");
+  const largeObs = find("site.performance.large_assets");
+
+  const http = deploymentHttp(site);
+  const areas = deploymentAreas(observations);
+  const areaStatus = (id: DeploymentAreaId): CheckStatus =>
+    areas.find((area) => area.id === id)?.status ?? "could_not_verify";
+
+  const row = (
+    id: DeploymentRowId,
+    label: string,
+    status: CheckStatus,
+    value: string,
+    detail: string,
+  ): DeploymentRow => ({ id, label, status, value, detail });
 
   const accessibility = (() => {
     if (!site || !site.readable) {
-      if (!detail.demoUrl) return row("availability", "Availability", "could_not_verify", "Not checked", needsSite ? "No deployed URL was submitted, so the live application was not inspected. That is a gap in the evidence, not proof that the app does not work." : `A ${PROJECT_TYPE_LABELS[type].toLowerCase()} does not need a deployed website, so this is not counted against the project.`);
-      return row("availability", "Availability", "could_not_verify", "Not checked", site?.detail ?? "The submitted URL was reachable in principle but the page itself could not be read, so live availability is unverified.");
+      if (!detail.demoUrl)
+        return row(
+          "availability",
+          "Availability",
+          "could_not_verify",
+          "Not checked",
+          needsSite
+            ? "No deployed URL was submitted, so the live application was not inspected. That is a gap in the evidence, not proof that the app does not work."
+            : `A ${PROJECT_TYPE_LABELS[type].toLowerCase()} does not need a deployed website, so this is not counted against the project.`,
+        );
+      return row(
+        "availability",
+        "Availability",
+        "could_not_verify",
+        "Not checked",
+        site?.detail ??
+          "The submitted URL was reachable in principle but the page itself could not be read, so live availability is unverified.",
+      );
     }
-    if (reachableObs?.status === "critical") return row("availability", "Availability", "critical", "Not reachable", reachableObs.result);
-    if (reachableObs?.status === "warning") return row("availability", "Availability", "warning", "Partially reachable", reachableObs.result);
-    return row("availability", "Availability", "good", "Online", reachableObs ? reachableObs.result : "The page was reached during inspection.");
+    if (reachableObs?.status === "critical") {
+      return row(
+        "availability",
+        "Availability",
+        "critical",
+        http.status !== null && http.status >= 500 ? "Server error" : "Not reachable",
+        reachableObs.result,
+      );
+    }
+    if (reachableObs?.status === "warning") {
+      return row("availability", "Availability", "warning", "Error response", reachableObs.result);
+    }
+    return row(
+      "availability",
+      "Availability",
+      "good",
+      "Online",
+      reachableObs ? reachableObs.result : "The page was reached during inspection.",
+    );
   })();
 
   const https = httpsObs
-    ? row("https", "HTTPS", httpsObs.status, httpsObs.status === "good" ? "Enabled" : "Plain HTTP", httpsObs.result)
+    ? row("https", "HTTPS", httpsObs.status, deploymentValue(httpsObs), httpsObs.result)
     : site && site.readable
-      ? row("https", "HTTPS", "could_not_verify", "Not checked", "HTTPS was not readable from the page that was served.")
-      : row("https", "HTTPS", "could_not_verify", "Not checked", "No page could be read to check HTTPS.");
+      ? row(
+          "https",
+          "HTTPS",
+          "could_not_verify",
+          "Not checked",
+          "HTTPS was not readable from the page that was served.",
+        )
+      : row(
+          "https",
+          "HTTPS",
+          "could_not_verify",
+          "Not checked",
+          "No page could be read to check HTTPS.",
+        );
 
   const response = statusObs
-    ? row("response", "Page response", statusObs.status, clip(statusObs.result, 60), statusObs.result)
+    ? row(
+        "response",
+        "Page response",
+        statusObs.status,
+        deploymentValue(statusObs),
+        statusObs.result,
+      )
     : site && site.readable
-      ? row("response", "Page response", "could_not_verify", "Not measured", "No HTTP status was recorded for the served page.")
-      : row("response", "Page response", "could_not_verify", "Not checked", "No page was served during inspection.");
+      ? row(
+          "response",
+          "Page response",
+          "could_not_verify",
+          "Not measured",
+          "No HTTP status was recorded for the served page.",
+        )
+      : row(
+          "response",
+          "Page response",
+          "could_not_verify",
+          "Not checked",
+          "No page was served during inspection.",
+        );
 
-  const performance = perfObs
-    ? row("performance", "Performance", perfObs.status, clip(perfObs.result, 60), perfObs.result)
-    : row("performance", "Performance", "could_not_verify", "Not measured", "No performance measurement was taken — BuildLens reports only what it can measure, never a fabricated score.");
+  const performanceChecks = areas.find((area) => area.id === "performance")?.checks ?? [];
+  const performanceStatus = areaStatus("performance");
+  const performanceNote =
+    performanceChecks.find((check) => check.status === "warning")?.detail ??
+    performanceChecks[0]?.detail ??
+    "No performance measurement was taken — BuildLens reports only what it can measure, never a fabricated score.";
+  const performance = row(
+    "performance",
+    "Performance",
+    performanceStatus,
+    performanceChecks.length === 0
+      ? "Not measured"
+      : performanceStatus === "warning"
+        ? "Needs review"
+        : performanceStatus === "good"
+          ? "Good"
+          : "Measured",
+    performanceNote,
+  );
 
-  const functionality = funcObs
-    ? row("functionality", "Functionality", funcObs.status, clip(funcObs.result, 60), funcObs.result)
-    : site && site.readable
-      ? row("functionality", "Functionality", "could_not_verify", "Not inspected", "The served page could be read, but no interactive functionality was directly tested.")
-      : row("functionality", "Functionality", "could_not_verify", "Not checked", "No page could be read, so the live interface was not inspected.");
+  const functionalityChecks = areas.find((area) => area.id === "functionality")?.checks ?? [];
+  const functionalityStatus = areaStatus("functionality");
+  const functionalityNote =
+    functionalityChecks.find((check) => check.id === "site.functionality.flows")?.detail ??
+    functionalityChecks.find((check) => check.status === "warning")?.detail ??
+    functionalityChecks[0]?.detail ??
+    "The served page could be read, but no interactive functionality was directly tested.";
+  const functionality = row(
+    "functionality",
+    "Functionality",
+    functionalityStatus,
+    functionalityStatus === "warning"
+      ? "Needs review"
+      : functionalityStatus === "good"
+        ? "Main page working"
+        : "Not inspected",
+    functionalityNote,
+  );
 
-  const security = secObs
-    ? row("security", "Security", secObs.status, clip(secObs.result, 60), secObs.result)
-    : site && site.readable
-      ? row("security", "Security", "could_not_verify", "Not inspected", "Only public web signals are inspected; server-side security is never tested from outside.")
-      : row("security", "Security", "could_not_verify", "Not checked", "No page could be read, so public security signals were not inspected.");
+  // Security reads from the two checks that carry real weight here: exposed
+  // secrets in public assets, then the response headers. Server-side security
+  // is always “could not verify”, never a pass.
+  const securityStatus: CheckStatus =
+    secretsObs?.status === "critical"
+      ? "critical"
+      : headersObs?.status === "warning"
+        ? "warning"
+        : secretsObs || headersObs
+          ? "not_detected"
+          : "could_not_verify";
+  const security = row(
+    "security",
+    "Security",
+    securityStatus,
+    securityStatus === "critical"
+      ? "Possible exposed secret"
+      : securityStatus === "warning"
+        ? "Some headers missing"
+        : securityStatus === "not_detected"
+          ? "No obvious exposed secrets"
+          : "Not inspected",
+    [
+      secretsObs?.result,
+      headersObs?.result,
+      "Server-side security (authorization, injection, data exposure) was not tested — a public page cannot show it.",
+    ]
+      .filter((line): line is string => Boolean(line))
+      .join(" "),
+  );
 
-  const mobile = uxObs
-    ? row("mobile", "Mobile / responsive", uxObs.status, clip(uxObs.result, 60), uxObs.result)
-    : row("mobile", "Mobile / responsive", "could_not_verify", "Not measured", "No responsive-layout signal was captured for the served page.");
+  const responsiveChecks = areas.find((area) => area.id === "responsiveness")?.checks ?? [];
+  const mobileStatus = areaStatus("responsiveness");
+  const mobile = row(
+    "mobile",
+    "Mobile / responsive",
+    mobileStatus,
+    mobileStatus === "good"
+      ? "Viewport configured"
+      : mobileStatus === "warning"
+        ? "Needs review"
+        : "Not measured",
+    responsiveChecks[0]?.detail ?? "No responsive-layout signal was captured for the served page.",
+  );
 
   const limitations: string[] = [];
-  if (performance.status === "could_not_verify") {
-    limitations.push("No performance measurement (Lighthouse or equivalent) was taken; response behaviour is therefore not scored.");
+  if (site && site.readable) {
+    limitations.push(
+      "Server-side security (authorization, injection, data exposure) was not tested — this is a public-page inspection, not a penetration test.",
+    );
+    limitations.push(
+      "No Lighthouse or PageSpeed run is performed, so no performance score is reported; the measurements are raw observations.",
+    );
+    limitations.push(
+      "Interactive flows were not clicked through: only the served landing page and its same-origin links were requested.",
+    );
+    limitations.push(
+      "Layout, overflow and readability were not visually inspected; the markup was read, not rendered.",
+    );
   }
-  if (functionality.status === "could_not_verify") {
-    limitations.push("Interactive functionality was not directly tested; only the served page content was read.");
-  }
-  if (security.status === "could_not_verify") {
-    limitations.push("Server-side security was not tested — this is a public-source inspection, not a penetration test.");
-  }
-  if (mobile.status === "could_not_verify") {
-    limitations.push("Responsive/mobile layout was not measured; the served page was read at the inspection width only.");
+  if (!needsSite) {
+    limitations.push(
+      `A ${PROJECT_TYPE_LABELS[type].toLowerCase()} does not require a deployed website; the repository and deck were inspected instead.`,
+    );
   }
 
   return {
@@ -968,66 +1279,118 @@ function buildDeployment(
     url: detail.demoUrl ?? null,
     checkedAt: generatedAt,
     rows: [accessibility, https, response, performance, functionality, security, mobile],
-    observations: site
-      ? (site.observations ?? []).map((entry) => entry.result)
-      : [],
+    areas,
+    http,
+    routes: linksObs?.evidence ?? [],
+    resources: [...(failedObs?.evidence ?? []), ...(largeObs?.evidence ?? [])],
+    observations: observations.map((entry) => entry.result),
     evidence: [detail.demoUrl].filter(Boolean) as string[],
     limitations,
   };
 }
 
-/**
- * The claim table: candidate claim → what each independent source showed →
- * verdict. `not_checked` is never dressed up as a negative and is separated
- * from `not_found`, which is what the readable sources actually showed.
- */
-function claimsTableFor(
-  bundle: EvidenceBundle | null,
-  needsWebsite: boolean,
-): ClaimVerificationRow[] {
-  if (!bundle) return [];
+/** Findings from the verification layer turned back into inspection checks. */
+function featureCheck(feature: FeatureVerification): InspectionCheck {
+  const status: CheckStatus =
+    feature.result === "supported"
+      ? "supported"
+      : feature.result === "partial"
+        ? "partially_supported"
+        : feature.result === "not_supported"
+          ? "not_found"
+          : "could_not_verify";
 
-  return bundle.claims.map((claim) => {
-    const verdict = verdictOf(claim);
-    const claimType = claim.claimType ?? claimTypeOf(claim.claim, claim.category);
-    const repository: ClaimSourceFinding = claim.bySource?.repository ?? "not_checked";
-    const liveApp: ClaimSourceFinding = claim.bySource?.website ?? "not_checked";
+  return {
+    id: feature.id,
+    section: "functionality",
+    title: feature.feature,
+    result: VERIFICATION_RESULT_LABELS[feature.result],
+    status,
+    explanation: `${feature.note} Searched in: ${feature.searched.join(", ")}. Tested against the deployed application: ${feature.tested ? "yes" : "no"}.`,
+    evidence: feature.evidence,
+    confidence: "high",
+  };
+}
 
-    const missingEvidence: string[] = [];
-    if (repository === "not_found") {
-      missingEvidence.push("No matching implementation was found in the repository.");
-    } else if (repository === "partial") {
-      missingEvidence.push("The repository shows only part of this claim.");
-    } else if (repository === "not_checked") {
-      missingEvidence.push(
-        "The repository was not read, so implementation evidence is missing.",
-      );
-    }
-    if (liveApp === "not_found") {
-      missingEvidence.push("The deployed application does not show this.");
-    } else if (liveApp === "partial") {
-      missingEvidence.push("The deployed application shows only part of this claim.");
-    } else if (liveApp === "not_checked" && needsWebsite) {
-      missingEvidence.push("The deployed application was not read, so live behaviour is untested.");
-    }
+function riskCheck(finding: SecurityFinding): InspectionCheck {
+  const status: CheckStatus =
+    finding.severity === "critical" || finding.severity === "high"
+      ? "critical"
+      : finding.severity === "medium"
+        ? "warning"
+        : "info";
 
-    return {
-      id: claim.id,
-      claim: claim.claim,
-      claimType: CLAIM_TYPE_LABELS[claimType],
-      source: claim.sourceRef ?? (claim.id.startsWith("readme.") ? "README" : "Submission"),
-      pageRefs: claim.pageRefs ?? [],
-      repository,
-      liveApp,
-      verdict,
-      verdictLabel: CLAIM_VERDICT_LABELS[verdict],
-      note: claim.note,
-      evidenceRefs: claim.evidenceRefs ?? [],
-      quotes: claim.quotes,
-      missingEvidence,
-      contradiction: claim.contradiction ?? null,
-    };
-  });
+  return {
+    id: `risk.${finding.id}`,
+    section: "security",
+    title: finding.title,
+    result: `${SEVERITY_LABELS[finding.severity]} risk · ${finding.kind === "exposure" ? "exposure" : finding.kind === "policy" ? "policy recommendation" : "configuration"}`,
+    status,
+    explanation: finding.detail,
+    evidence: finding.evidence,
+    confidence: "high",
+  };
+}
+
+/** Two to four sentences the judge reads before anything else. */
+function buildExecutiveSummary(input: {
+  counts: ClaimCounts & { total: number };
+  mismatch: DocumentMismatch;
+  features: ReturnType<typeof featureCounts>;
+  security: SecurityAssessment;
+  overallScore: number | null;
+}): string {
+  const sentences: string[] = [];
+
+  if (input.overallScore === null) {
+    sentences.push(
+      "Nothing measurable could be read from this submission, so it could not be scored.",
+    );
+  } else if (input.counts.total === 0) {
+    sentences.push(
+      "No checkable claims were submitted, so only the sources themselves were inspected.",
+    );
+  } else if (input.counts.not_found + input.counts.partially_supported === 0) {
+    sentences.push(
+      `All ${input.counts.total} checked claims are backed by the sources that were read.`,
+    );
+  } else {
+    sentences.push(
+      `${input.counts.supported} of ${input.counts.total} checked claims are supported; ${input.counts.not_found} could not be found in the repository or the deployment and ${input.counts.partially_supported} are only partly backed.`,
+    );
+  }
+
+  if (input.mismatch.level === "major") {
+    sentences.push(
+      "The submitted document describes a different product from the one that was submitted, which caps the overall score.",
+    );
+  } else if (input.mismatch.level === "possible") {
+    sentences.push(
+      "Part of the submitted document does not line up with the project that was actually submitted.",
+    );
+  }
+
+  if (input.features.missing > 0) {
+    sentences.push(
+      `${input.features.missing} of ${input.features.total} claimed features were not found in the repository or the deployed application.`,
+    );
+  }
+
+  if (input.security.counts.critical > 0) {
+    sentences.push(
+      "A credential appears to be exposed in the sources that were read; rotate it before judging the rest.",
+    );
+  } else if (input.security.counts.high > 0) {
+    sentences.push(input.security.headline);
+  }
+
+  if (sentences.length < 2 && input.overallScore !== null) {
+    sentences.push(
+      "No unsupported claim, missing feature or exposed credential was detected in what was inspected.",
+    );
+  }
+
+  return sentences.slice(0, 4).join(" ");
 }
 
 function buildVerdict(
@@ -1036,8 +1399,14 @@ function buildVerdict(
   evaluation: StructuredEvaluation | null,
   sections: InspectionSection[],
   type: ProjectType,
-  generatedAt: string,
+  analysis: {
+    features: FeatureVerification[];
+    mismatch: DocumentMismatch;
+    security: SecurityAssessment;
+    deployment: DeploymentInspection;
+  },
 ): JudgeVerdict {
+  const { features, mismatch, security: assessment, deployment } = analysis;
   const counts: ClaimCounts & { total: number } = {
     ...(bundle?.counts ?? zeroCounts()),
     total: bundle?.claims.length ?? 0,
@@ -1045,8 +1414,7 @@ function buildVerdict(
   const checks = sections.flatMap((section) => section.checks);
   const readableVerification =
     bundle?.sources.filter(
-      (source) =>
-        source.readable && (source.kind === "repository" || source.kind === "website"),
+      (source) => source.readable && (source.kind === "repository" || source.kind === "website"),
     ).length ?? 0;
   const tone = verdictTone(counts, checks, readableVerification);
   const needed = requiredInputs(type);
@@ -1068,22 +1436,11 @@ function buildVerdict(
       : counts.total === 0
         ? "No checkable claims were submitted — only the sources themselves could be inspected."
         : unresolved === 0
-        ? `${TONE_LEAD[tone]} — every checked claim is backed by evidence.`
-        : `${TONE_LEAD[tone]}, but ${unresolved} claim${unresolved === 1 ? "" : "s"} could not be fully verified.`;
+          ? `${TONE_LEAD[tone]} — every checked claim is backed by evidence.`
+          : `${TONE_LEAD[tone]}, but ${unresolved} claim${unresolved === 1 ? "" : "s"} could not be fully verified.`;
 
   const claims = bundle?.claims ?? [];
   const short = (value: string) => clip(value, 110);
-
-  const deployment = buildDeployment(detail, bundle, type, generatedAt);
-  const findings = buildFindings({ bundle, deployment, type });
-  const attention = attentionFindings(findings);
-  const verdictCounts = { ...claimVerdictCounts(claims), total: claims.length };
-  const dimensions = buildDimensions({ bundle, deployment, verdictCounts, findings });
-  const candidateProvided =
-    bundle?.candidateProvided && bundle.candidateProvided.length > 0
-      ? bundle.candidateProvided
-      : candidateFactsFrom(detail.presentationPages ?? null, detail.team ?? null);
-  const claimsTable = claimsTableFor(bundle, requiredInputs(type).website);
 
   const verified = claims
     .filter((claim) => claim.status === "supported")
@@ -1092,56 +1449,180 @@ function buildVerdict(
     .filter((claim) => claim.status !== "supported")
     .map((claim) => `${short(claim.claim)} — ${CLAIM_STATUS_LABELS[claim.status].toLowerCase()}`);
 
+  const breakdown = scoreEvaluation({
+    claims,
+    features,
+    deployment,
+    security: assessment,
+    mismatch,
+    bundle,
+  });
+  const featureSummary = featureCounts(features);
+
+  /* Concerns are assembled from the evidence, then ordered by severity: what a
+     judge has to act on comes first, and nothing appears twice. */
+  const featureClaimIds = new Set(features.map((feature) => feature.id.replace(/^feature:/, "")));
+  const concerns: JudgeConcern[] = [];
+  const seenConcerns = new Set<string>();
+  const addConcern = (text: string, severity: Severity) => {
+    const key = text.toLowerCase().slice(0, 70);
+    if (seenConcerns.has(key)) return;
+    seenConcerns.add(key);
+    concerns.push({ text: clip(text, 190), severity });
+  };
+
+  for (const signal of mismatch.signals) addConcern(signal.detail, signal.severity);
+
+  /*
+   * Claims are grouped, never listed one per claim: a 20-slide deck with 12
+   * unsupported claims used to produce 12 near-identical warnings and bury the
+   * real risks. Each group carries a count and up to three examples.
+   */
+  const contradicted = claims.filter((claim) => claim.verdict === "contradicted");
+  if (contradicted.length > 0) {
+    addConcern(
+      `${contradicted.length} claim${contradicted.length === 1 ? "" : "s"} contradicted by the evidence: ${contradicted
+        .slice(0, 3)
+        .map((claim) => short(claim.claim))
+        .join(", ")}`,
+      "critical",
+    );
+  }
+
+  const unsupported = claims.filter((claim) => claim.verdict === "unsupported");
+  if (unsupported.length > 0) {
+    addConcern(
+      `${unsupported.length} quantified claim${unsupported.length === 1 ? "" : "s"} without a supporting figure: ${unsupported
+        .slice(0, 3)
+        .map((claim) => short(claim.claim))
+        .join(", ")}`,
+      "medium",
+    );
+  }
+
+  const missingClaims = claims.filter(
+    (claim) => claim.status === "not_found" && !featureClaimIds.has(claim.id),
+  );
+  if (missingClaims.length > 0) {
+    addConcern(
+      `${missingClaims.length} claim${missingClaims.length === 1 ? "" : "s"} could not be verified: ${missingClaims
+        .slice(0, 3)
+        .map((claim) => short(claim.claim))
+        .join(", ")}${missingClaims.length > 3 ? `, +${missingClaims.length - 3} more` : ""}`,
+      missingClaims.some((claim) => claim.kind === "ai" || claim.kind === "security")
+        ? "high"
+        : "medium",
+    );
+  }
+
+  // Claimed features that were not found are one grouped concern with examples,
+  // not one warning per feature: the judge needs the size of the gap at a
+  // glance, not a wall of near-identical lines.
+  const missingFeatures = features.filter((feature) => feature.result !== "supported" && !feature.found);
+  if (missingFeatures.length > 0) {
+    addConcern(
+      `${missingFeatures.length} claimed feature${missingFeatures.length === 1 ? "" : "s"} could not be found in the implementation or the deployed application: ${missingFeatures
+        .slice(0, 3)
+        .map((feature) => clip(feature.feature, 70))
+        .join(", ")}${missingFeatures.length > 3 ? `, +${missingFeatures.length - 3} more` : ""}`,
+      missingFeatures.some((feature) => feature.severity === "critical")
+        ? "critical"
+        : missingFeatures.some((feature) => feature.severity === "high")
+          ? "high"
+          : "medium",
+    );
+  }
+
+  for (const finding of assessment.findings) {
+    if (finding.kind === "exposure") {
+      addConcern(`${finding.title}; ${finding.detail}`, finding.severity);
+    }
+  }
+
+  for (const check of checks) {
+    if (check.section === "claims" || check.section === "security") continue;
+    if (check.status === "critical") {
+      addConcern(`${check.title}: ${clip(check.result, 110)}`, "critical");
+    }
+  }
+
+  for (const finding of assessment.findings) {
+    if (finding.kind !== "exposure") {
+      addConcern(`${finding.title} (${SEVERITY_LABELS[finding.severity]})`, finding.severity);
+    }
+  }
+
+  concerns.sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
+  const keyConcerns = concerns.slice(0, 5);
+
+  const severityCounts: Record<Severity, number> = { critical: 0, high: 0, medium: 0, low: 0 };
+  for (const concern of concerns) severityCounts[concern.severity] += 1;
+
   const strengths = [
+    ...features
+      .filter((feature) => feature.result === "supported")
+      .map(
+        (feature) =>
+          `${feature.feature} — verified${feature.tested ? " and observed in the deployed application" : " in the implementation"}`,
+      ),
     ...checks
       .filter((check) => check.status === "good" && check.section !== "claims")
       .map((check) => `${check.title}: ${clip(check.result, 90)}`),
     ...verified.map((claim) => `Supported claim: ${claim}`),
   ].slice(0, 6);
 
-  // Problems are the grouped, severity-ranked findings — not one line per
-  // claim and not one line per observation. Risk decides order.
-  const problems = attention.map(
-    (entry) => `${entry.severity === "critical" ? "✕" : "⚠"} ${entry.title} — ${clip(entry.summary, 110)}`,
-  ).slice(0, 6);
+  const problems = keyConcerns.map((concern) => concern.text);
 
-  const security = checks
-    .filter((check) => check.section === "security")
-    .map((check) => `${CHECK_STATUS_LABELS[check.status]} — ${clip(check.result, 110)}`)
-    .slice(0, 5);
+  const security = [
+    ...assessment.findings.map(
+      (finding) => `${SEVERITY_LABELS[finding.severity]} — ${clip(finding.title, 110)}`,
+    ),
+    ...checks
+      .filter((check) => check.section === "security")
+      .map((check) => `${CHECK_STATUS_LABELS[check.status]} — ${clip(check.result, 110)}`),
+  ].slice(0, 5);
 
   return {
     headline,
     tone,
     toneLabel: VERDICT_TONE_LABELS[tone],
     score: evaluation?.overallScore ?? null,
+    overallScore: breakdown.overall,
+    overallBand: scoreBand(breakdown.overall),
+    breakdown,
+    executiveSummary: buildExecutiveSummary({
+      counts,
+      mismatch,
+      features: featureSummary,
+      security: assessment,
+      overallScore: breakdown.overall,
+    }),
+    keyConcerns,
+    severityCounts,
+    mismatch,
+    features,
+    featureSummary,
     aiAvailable: Boolean(evaluation),
     counts,
-    verdictCounts,
+    candidateProvided:
+      bundle?.candidateProvided && bundle.candidateProvided.length > 0
+        ? bundle.candidateProvided
+        : candidateFactsFrom(detail.presentationPages ?? null, detail.team ?? null),
     claimed: claims.slice(0, 5).map((claim) => short(claim.claim)),
     verified: verified.slice(0, 5),
     unverified: unverified.slice(0, 5),
     problems,
     strengths,
     security,
-    claimsTable,
-    findings,
-    attention,
-    severityCounts: severityCounts(findings),
-    dimensions,
-    candidateProvided,
-    aiSummary:
-      evaluation?.finalSummary.verdict ?? evaluation?.summary ?? null,
+    aiSummary: evaluation?.finalSummary.verdict ?? evaluation?.summary ?? null,
     judgeBullets: judgeBullets({
       type,
       counts,
-      verdictCounts,
       checks,
       bundle,
       detail,
       tone,
       missingInputs,
-      findings,
     }),
     projectType: type,
     projectTypeLabel: PROJECT_TYPE_LABELS[type],
@@ -1171,9 +1652,7 @@ export function buildInspectionReport(input: InspectionInput): InspectionReport 
       ...(detail.presentationClaims?.solution ?? []),
       ...(detail.presentationClaims?.summary ? [detail.presentationClaims.summary] : []),
     ].join(" "),
-    hasReadableWebsite: sources.some(
-      (source) => source.kind === "website" && source.readable,
-    ),
+    hasReadableWebsite: sources.some((source) => source.kind === "website" && source.readable),
   });
   const type = detected.type;
 
@@ -1181,6 +1660,14 @@ export function buildInspectionReport(input: InspectionInput): InspectionReport 
     ...(bundle?.counts ?? zeroCounts()),
     total: bundle?.claims.length ?? 0,
   };
+
+  /* Verification layer: what was claimed vs. what was found and tested. */
+  const claims = bundle?.claims ?? [];
+  const features = buildFeatureVerification({ claims, bundle });
+  const mismatch = assessDocumentMismatch({ detail, bundle, claims });
+  const security = assessSecurity(bundle);
+  const generatedAt = new Date().toISOString();
+  const deployment = buildDeployment(detail, bundle, type, generatedAt);
 
   const claimRows = claimChecks(bundle);
   if (claimRows.length === 0) {
@@ -1206,18 +1693,53 @@ export function buildInspectionReport(input: InspectionInput): InspectionReport 
     "Add a description or attach a deck so there is something to verify.",
   );
 
+  /* Risk findings and feature rows lead their sections: a judge reading the
+     detail view should meet the exposure before the hardening note. */
+  const riskChecks = security.findings.map(riskCheck);
+  const securityBase = areaSection(
+    "security",
+    bundle,
+    ["security"],
+    "No security check could run because no site or repository was read.",
+    "Submit a repository or deployed URL to inspect security signals.",
+  );
+  const securitySection =
+    riskChecks.length > 0
+      ? sectionOf(
+          "security",
+          [
+            ...riskChecks,
+            ...securityBase.checks.filter((check) => check.id !== "security.unavailable"),
+          ],
+          security.headline,
+          securityBase.empty,
+        )
+      : securityBase;
+
+  const functionalityBase = areaSection(
+    "functionality",
+    bundle,
+    ["functionality", "ux"],
+    "No functionality or UX signal could be collected from the sources that were read.",
+    "Submit a deployed URL to inspect the public interface.",
+  );
+  const featureChecks = features.map(featureCheck);
+  const functionalitySection =
+    featureChecks.length > 0
+      ? sectionOf(
+          "functionality",
+          [...featureChecks, ...functionalityBase.checks],
+          `${featureChecks.length} claimed feature${featureChecks.length === 1 ? "" : "s"} were checked against the repository and the deployed application.`,
+          functionalityBase.empty,
+        )
+      : functionalityBase;
+
   const sections: InspectionSection[] = [
     claimsSection,
-    documentSection(detail, bundle),
+    documentSection(detail, bundle, mismatch),
     repositorySection(bundle),
     deploymentSection(detail, bundle, type),
-    areaSection(
-      "security",
-      bundle,
-      ["security"],
-      "No security check could run because no site or repository was read.",
-      "Submit a repository or deployed URL to inspect security signals.",
-    ),
+    securitySection,
     areaSection(
       "performance",
       bundle,
@@ -1225,25 +1747,25 @@ export function buildInspectionReport(input: InspectionInput): InspectionReport 
       "No performance measurement could run because no deployed page was read.",
       "Submit a deployed URL to measure response and asset behaviour.",
     ),
-    areaSection(
-      "functionality",
-      bundle,
-      ["functionality", "ux"],
-      "No functionality or UX signal could be collected from the sources that were read.",
-      "Submit a deployed URL to inspect the public interface.",
-    ),
+    functionalitySection,
     aiSection(evaluation, input.runError),
     rubricSection(evaluation),
     evidenceSection(bundle, counts),
   ];
 
-  const verdict = buildVerdict(detail, bundle, evaluation, sections, type, new Date().toISOString());
-  verdict.strategy = detected.reasons.length > 0
-    ? `${PROJECT_TYPE_STRATEGY[type]} (${detected.reasons.join(" ")})`
-    : PROJECT_TYPE_STRATEGY[type];
+  const verdict = buildVerdict(detail, bundle, evaluation, sections, type, {
+    features,
+    mismatch,
+    security,
+    deployment,
+  });
+  verdict.strategy =
+    detected.reasons.length > 0
+      ? `${PROJECT_TYPE_STRATEGY[type]} (${detected.reasons.join(" ")})`
+      : PROJECT_TYPE_STRATEGY[type];
 
   return {
-    generatedAt: new Date().toISOString(),
+    generatedAt,
     projectType: type,
     projectTypeLabel: PROJECT_TYPE_LABELS[type],
     strategy: verdict.strategy,
@@ -1251,6 +1773,10 @@ export function buildInspectionReport(input: InspectionInput): InspectionReport 
     sections,
     sources,
     counts,
+    features,
+    mismatch,
+    security,
+    score: verdict.breakdown,
     ai: {
       available: Boolean(evaluation),
       model: evaluation?.model ?? null,

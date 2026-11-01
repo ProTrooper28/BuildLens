@@ -135,6 +135,39 @@ export interface Claim {
   claim: string;
   verified: boolean;
   evidence: string | null;
+  /** Where the claim came from: `PPT`, `PDF`, `README`, `SUBMISSION`. */
+  source?: string | null;
+  /** `Slide 6`, `README.md — Features`, … */
+  sourceLocation?: string | null;
+  /** Deterministic verdict from the registered claim pipeline. */
+  status?: string | null;
+  /** Why that verdict was assigned, in plain language. */
+  reason?: string | null;
+  category?: string | null;
+  /** Where the claim appeared — several sources are merged into one row. */
+  sources?: { source: string; location: string | null }[] | undefined;
+}
+
+export interface ClaimCounts {
+  total: number;
+  supported: number;
+  partial: number;
+  unsupported: number;
+  could_not_verify: number;
+  unverified: number;
+}
+
+/** Extraction → dedup → registration bookkeeping for one report. */
+export interface ClaimPipeline {
+  deck: number;
+  readme: number;
+  repository: number;
+  extracted: number;
+  deduped: number;
+  registered: number;
+  verified: number;
+  /** Set when claims were extracted but none reached registration. */
+  error: string | null;
 }
 
 export interface RepositoryDetail {
@@ -178,6 +211,21 @@ export interface DocumentClaimsView {
   method: string | null;
 }
 
+/** `report_data.evidence` — what the analysis actually inspected. */
+export interface EvidenceSummaryView {
+  provider: string | null;
+  repository: string | null;
+  repositoryUrl: string | null;
+  defaultBranch: string | null;
+  license: string | null;
+  filesListed: number | null;
+  inspectedAt: string | null;
+  readmePath: string | null;
+  testFiles: number | null;
+  packageManager: string | null;
+  configFiles: string[];
+}
+
 /** `report_data.document_analysis` — claims extracted from the submitted deck. */
 export interface DocumentAnalysisView {
   status: string | null;
@@ -208,13 +256,23 @@ export interface ReportScoreSet {
   innovation: number | null;
 }
 
-export interface ScoreBreakdownEntry {
+/** One row of the report's score breakdown (six fixed categories). */
+export interface ScoreboardCategoryView {
   key: string;
   label: string;
-  weight: number;
-  score: number | null;
-  contribution: number | null;
+  /** Points earned, or null when the category had no evidence. */
+  points: number | null;
+  max: number;
+  measured: boolean;
   rationale: string;
+  evidence: string[];
+}
+
+export interface ScoreboardView {
+  overall: number | null;
+  points: number;
+  measuredMax: number;
+  categories: ScoreboardCategoryView[];
 }
 
 export interface ReportAnalysisStage {
@@ -298,12 +356,16 @@ export interface ReportView {
   repository: RepositoryDetail | null;
   website: WebsiteDetail | null;
   claims: Claim[];
+  claimCounts: ClaimCounts;
+  claimPipeline: ClaimPipeline | null;
   documentAnalysis: DocumentAnalysisView | null;
+  evidence: EvidenceSummaryView | null;
   innovation: InnovationDetail | null;
   timeline: { time: string; event: string }[];
   interviewQuestions: string[];
   judgeQuestions: string[];
-  scoreBreakdown: { overall: number | null; dimensions: ScoreBreakdownEntry[] } | null;
+  /** The six-category score breakdown the report leads with (null on legacy payloads). */
+  scoreboard: ScoreboardView | null;
   analysis: ReportAnalysisMeta | null;
   /** Which required sections actually carried data in the payload. */
   present: Record<ReportSectionKey, boolean>;
@@ -448,13 +510,75 @@ function normalizeClaims(value: unknown): Claim[] {
     .map((item): Claim | null => {
       const claim = firstString(item["claim"], item["title"], item["feature"]);
       if (!claim) return null;
+      const status = firstString(item["status"], item["verification_status"]);
+      const sources = asRecordArray(item["sources"])
+        .map((entry) => ({
+          source: firstString(entry["source"]) ?? "",
+          location: firstString(entry["location"]),
+        }))
+        .filter((entry) => entry.source !== "");
       return {
         claim,
-        verified: asBoolean(item["verified"]) ?? false,
+        // A claim counts as verified only on an explicit supported verdict —
+        // never because the claim itself appeared somewhere.
+        verified: status ? status === "supported" : (asBoolean(item["verified"]) ?? false),
         evidence: firstString(item["evidence"], item["detail"], item["proof"]),
+        source: firstString(item["source"]),
+        sourceLocation: firstString(item["source_location"], item["sourceLocation"]),
+        status: status ?? null,
+        reason: firstString(item["reason"], item["verification_reason"]),
+        category: firstString(item["category"]),
+        sources: sources.length > 0 ? sources : undefined,
       };
     })
     .filter((item): item is Claim => item !== null);
+}
+
+function normalizeClaimCounts(value: unknown, claims: readonly Claim[]): ClaimCounts {
+  const record = asRecord(value);
+  const count = (key: string, fallback: number) =>
+    typeof record[key] === "number" && Number.isFinite(record[key])
+      ? (record[key] as number)
+      : fallback;
+  const derived: ClaimCounts = {
+    total: claims.length,
+    supported: claims.filter((claim) => claim.verified).length,
+    partial: 0,
+    unsupported: 0,
+    could_not_verify: 0,
+    unverified: 0,
+  };
+  for (const claim of claims) {
+    if (claim.status === "partial") derived.partial += 1;
+    else if (claim.status === "unsupported") derived.unsupported += 1;
+    else if (claim.status === "could_not_verify") derived.could_not_verify += 1;
+    else if (claim.status === "unverified" || claim.status === null) derived.unverified += 1;
+  }
+  return {
+    total: count("total", derived.total),
+    supported: count("supported", derived.supported),
+    partial: count("partial", derived.partial),
+    unsupported: count("unsupported", derived.unsupported),
+    could_not_verify: count("could_not_verify", derived.could_not_verify),
+    unverified: count("unverified", derived.unverified),
+  };
+}
+
+function normalizeClaimPipeline(value: unknown): ClaimPipeline | null {
+  const record = asRecord(value);
+  if (Object.keys(record).length === 0) return null;
+  const num = (key: string) =>
+    typeof record[key] === "number" && Number.isFinite(record[key]) ? (record[key] as number) : 0;
+  return {
+    deck: num("deck"),
+    readme: num("readme"),
+    repository: num("repository"),
+    extracted: num("extracted"),
+    deduped: num("deduped"),
+    registered: num("registered"),
+    verified: num("verified"),
+    error: firstString(record["error"]),
+  };
 }
 
 function normalizeDocumentClaims(value: unknown): DocumentClaimsView | null {
@@ -512,6 +636,27 @@ function normalizeTimeline(value: unknown): { time: string; event: string }[] {
       return time && event ? { time, event } : null;
     })
     .filter((item): item is { time: string; event: string } => item !== null);
+}
+
+function normalizeEvidenceSummary(value: unknown): EvidenceSummaryView | null {
+  const record = asRecord(value);
+  if (Object.keys(record).length === 0) return null;
+  if (asString(record["repository"]) === null && asString(record["repository_url"]) === null) {
+    return null;
+  }
+  return {
+    provider: firstString(record["provider"]),
+    repository: firstString(record["repository"]),
+    repositoryUrl: firstString(record["repository_url"], record["repositoryUrl"]),
+    defaultBranch: firstString(record["default_branch"], record["defaultBranch"]),
+    license: firstString(record["license"]),
+    filesListed: asNumber(record["files_listed"] ?? record["filesListed"]),
+    inspectedAt: firstString(record["inspected_at"], record["inspectedAt"]),
+    readmePath: firstString(record["readme"]),
+    testFiles: asNumber(record["test_files"] ?? record["testFiles"]),
+    packageManager: firstString(record["package_manager"], record["packageManager"]),
+    configFiles: asStringArray(record["config_files"] ?? record["configFiles"]),
+  };
 }
 
 function normalizeRepository(value: unknown): RepositoryDetail | null {
@@ -585,26 +730,33 @@ function normalizeInnovation(value: unknown): InnovationDetail | null {
   };
 }
 
-function normalizeScoreBreakdown(
-  value: unknown,
-): { overall: number | null; dimensions: ScoreBreakdownEntry[] } | null {
+function normalizeScoreboard(value: unknown): ScoreboardView | null {
   const record = asRecord(value);
-  if (Object.keys(record).length === 0) return null;
-  const dimensions = asRecordArray(record["dimensions"])
-    .map((entry): ScoreBreakdownEntry | null => {
+  const categories = asRecordArray(record["categories"])
+    .map((entry): ScoreboardCategoryView | null => {
       const key = asString(entry["key"]);
       if (!key) return null;
+      const max = asNumber(entry["max"]);
+      if (max === null) return null;
+      const measured = asBoolean(entry["measured"]) ?? asNumber(entry["points"]) !== null;
       return {
         key,
         label: firstString(entry["label"]) ?? key,
-        weight: asNumber(entry["weight"]) ?? 0,
-        score: clampScore(asNumber(entry["score"])),
-        contribution: asNumber(entry["contribution"]),
-        rationale: firstString(entry["rationale"]) ?? "No rationale recorded.",
+        points: measured ? asNumber(entry["points"]) : null,
+        max,
+        measured,
+        rationale: firstString(entry["rationale"]) ?? "",
+        evidence: asStringArray(entry["evidence"]),
       };
     })
-    .filter((entry): entry is ScoreBreakdownEntry => entry !== null);
-  return { overall: clampScore(asNumber(record["overall"])), dimensions };
+    .filter((entry): entry is ScoreboardCategoryView => entry !== null);
+  if (categories.length === 0) return null;
+  return {
+    overall: clampScore(asNumber(record["overall"])),
+    points: asNumber(record["points"]) ?? 0,
+    measuredMax: asNumber(record["measuredMax"] ?? record["measured_max"]) ?? 0,
+    categories,
+  };
 }
 
 function normalizeAnalysis(value: unknown): ReportAnalysisMeta | null {
@@ -771,6 +923,10 @@ export function normalizeReportData(raw: unknown): ReportView {
       }, {}),
   );
 
+  const claims = normalizeClaims(data["claims"] ?? data["features"]);
+  const claimCounts = normalizeClaimCounts(data["claim_counts"] ?? data["claimCounts"], claims);
+  const claimPipeline = normalizeClaimPipeline(data["claim_pipeline"] ?? data["claimPipeline"]);
+
   const view: ReportView = {
     executiveSummary,
     overview: {
@@ -840,13 +996,16 @@ export function normalizeReportData(raw: unknown): ReportView {
     scores,
     repository,
     website,
-    claims: normalizeClaims(data["features"] ?? data["claims"]),
+    claims,
+    claimCounts,
+    claimPipeline,
     documentAnalysis: normalizeDocumentAnalysis(documentAnalysisRaw),
+    evidence: normalizeEvidenceSummary(data["evidence"] ?? data["evidence_summary"]),
     innovation,
     timeline: normalizeTimeline(data["timeline"]),
     interviewQuestions: asStringArray(data["interviewQuestions"] ?? data["interview_questions"]),
     judgeQuestions: asStringArray(data["judgeQuestions"] ?? data["judge_questions"]),
-    scoreBreakdown: normalizeScoreBreakdown(data["score_breakdown"] ?? data["scoreBreakdown"]),
+    scoreboard: normalizeScoreboard(data["scoreboard"]),
     analysis: normalizeAnalysis(data["analysis"]),
     present: {
       executiveSummary: executiveSummary !== null,
@@ -872,7 +1031,7 @@ export function normalizeReportData(raw: unknown): ReportView {
       risks: risks.length > 0 || securityFindings.length > 0,
       recommendations: recommendations.length > 0,
       documentAnalysis: normalizeDocumentAnalysis(documentAnalysisRaw) !== null,
-      overallScore: scores.overall !== null,
+      overallScore: scores.overall !== null || normalizeScoreboard(data["scoreboard"]) !== null,
     },
     hasPayloadData: Object.keys(data).length > 0,
   };

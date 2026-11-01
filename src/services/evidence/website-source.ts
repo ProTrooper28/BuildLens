@@ -345,9 +345,7 @@ function resourceUrls(html: string, base: URL): string[] {
     ...[...html.matchAll(/<img[^>]+src=["']([^"']+)["']/gi)].map((match) => match[1] ?? ""),
   ];
   return unique(
-    raw
-      .map((value) => absolute(value, base))
-      .filter((value): value is string => Boolean(value)),
+    raw.map((value) => absolute(value, base)).filter((value): value is string => Boolean(value)),
   );
 }
 
@@ -523,6 +521,23 @@ export async function websiteEvidence(submission: EvaluationSubmission): Promise
   const host = finalUrl.host;
 
   observations.push(
+    // Explicit reachability record, so a judge sees the request that was made
+    // rather than inferring availability from another row.
+    observation(
+      "site.accessibility.reachable",
+      "accessibility",
+      "Deployed site reachable",
+      isUp ? "good" : response.status >= 500 ? "critical" : "warning",
+      isUp
+        ? `The deployed site answered the request and served a page at ${host}.`
+        : `The deployed site answered with HTTP ${response.status}, so visitors do not get the landing page.`,
+      [
+        `Requested ${url.toString()}`,
+        `Final URL: ${finalUrl.toString()}`,
+        `HTTP ${response.status} in ${totalMs}ms`,
+      ],
+      "high",
+    ),
     observation(
       "site.accessibility.https",
       "accessibility",
@@ -553,7 +568,9 @@ export async function websiteEvidence(submission: EvaluationSubmission): Promise
       redirects === 0
         ? "The submitted URL is the final URL — no redirect chain."
         : `The page redirected ${redirects} time${redirects === 1 ? "" : "s"} before loading.`,
-      steps.map((step) => `${step.status} ${step.url}${step.location ? ` → ${step.location}` : ""}`),
+      steps.map(
+        (step) => `${step.status} ${step.url}${step.location ? ` → ${step.location}` : ""}`,
+      ),
       "high",
     ),
   );
@@ -613,7 +630,8 @@ export async function websiteEvidence(submission: EvaluationSubmission): Promise
   if (title) facts.push(`Page title: “${title}”.`);
   if (description) facts.push(`Meta description: “${description}”.`);
   if (generator) facts.push(`Generator meta tag: ${generator}.`);
-  if (frameworks.length > 0) facts.push(`Framework signals in the markup: ${frameworks.join(", ")}.`);
+  if (frameworks.length > 0)
+    facts.push(`Framework signals in the markup: ${frameworks.join(", ")}.`);
   facts.push(
     `Interactive elements: ${forms} form${forms === 1 ? "" : "s"}, ${inputs} input${inputs === 1 ? "" : "s"}, ${buttons} button${buttons === 1 ? "" : "s"}.`,
     `${externalLinks} external link${externalLinks === 1 ? "" : "s"} found.`,
@@ -730,7 +748,45 @@ export async function websiteEvidence(submission: EvaluationSubmission): Promise
   const slowAssets = assetProbes.filter((entry) => entry.ms > SLOW_ASSET_MS);
   const measuredAssets = assetProbes.filter((entry) => entry.status !== null);
 
+  const failedResourceLines = failedAssets.map(
+    (entry) => `${entry.url} — ${entry.status === null ? "no response" : `HTTP ${entry.status}`}`,
+  );
+  const largeResourceLines = largeAssets.map(
+    (entry) =>
+      `${entry.url} — ${entry.bytes === null ? "size unknown" : `${Math.round(entry.bytes / 1024)} KB`}`,
+  );
+
   observations.push(
+    observation(
+      "site.performance.failed_resources",
+      "performance",
+      "Failed resources",
+      assetProbes.length === 0 ? "could_not_verify" : failedAssets.length > 0 ? "warning" : "good",
+      assetProbes.length === 0
+        ? "No same-origin resources were found to request, so resource failures could not be measured."
+        : failedAssets.length === 0
+          ? `All ${assetProbes.length} sampled resource${assetProbes.length === 1 ? "" : "s"} responded normally.`
+          : `${failedAssets.length} of ${assetProbes.length} sampled resources did not respond successfully.`,
+      failedResourceLines.slice(0, MAX_RESOURCE_CHECKS),
+      "medium",
+    ),
+    observation(
+      "site.performance.large_assets",
+      "performance",
+      "Large assets",
+      measuredAssets.length === 0
+        ? "could_not_verify"
+        : largeAssets.length > 0
+          ? "warning"
+          : "good",
+      measuredAssets.length === 0
+        ? "Resource sizes could not be measured (no content-length was returned)."
+        : largeAssets.length === 0
+          ? `No sampled resource was larger than ${Math.round(LARGE_ASSET_BYTES / 1000)} KB.`
+          : `${largeAssets.length} sampled resource${largeAssets.length === 1 ? " is" : "s are"} larger than ${Math.round(LARGE_ASSET_BYTES / 1000)} KB.`,
+      largeResourceLines.slice(0, MAX_RESOURCE_CHECKS),
+      "medium",
+    ),
     observation(
       "site.performance.assets",
       "performance",
@@ -785,11 +841,7 @@ export async function websiteEvidence(submission: EvaluationSubmission): Promise
       "site.functionality.links",
       "functionality",
       "Links on the landing page",
-      linkProbes.length === 0
-        ? "could_not_verify"
-        : brokenLinks.length > 0
-          ? "warning"
-          : "good",
+      linkProbes.length === 0 ? "could_not_verify" : brokenLinks.length > 0 ? "warning" : "good",
       linkProbes.length === 0
         ? "No same-origin links were available to check."
         : brokenLinks.length === 0
@@ -824,8 +876,11 @@ export async function websiteEvidence(submission: EvaluationSubmission): Promise
   // What the served markup literally shows — a login / sign-up entry point is
   // observable, the flow behind it is not exercised.
   const authSignals = unique(
-    [...html.matchAll(/\b(log ?in|log ?on|sign ?in|sign ?up|register|create account|forgot password|continue with google|continue with github)\b/gi)]
-      .map((match) => match[0].toLowerCase())
+    [
+      ...html.matchAll(
+        /\b(log ?in|log ?on|sign ?in|sign ?up|register|create account|forgot password|continue with google|continue with github)\b/gi,
+      ),
+    ].map((match) => match[0].toLowerCase()),
   );
   observations.push(
     authSignals.length > 0
@@ -880,18 +935,17 @@ export async function websiteEvidence(submission: EvaluationSubmission): Promise
       "site.ux.images",
       "ux",
       "Image accessibility",
-      images.length === 0
-        ? "could_not_verify"
-        : imagesMissingAlt > 0
-          ? "warning"
-          : "good",
+      images.length === 0 ? "could_not_verify" : imagesMissingAlt > 0 ? "warning" : "good",
       images.length === 0
         ? "No images are declared in the HTML (they may be loaded by scripts)."
         : imagesMissingAlt === 0
           ? `All ${images.length} image${images.length === 1 ? "" : "s"} in the markup carry an alt attribute.`
           : `${imagesMissingAlt} of ${images.length} images in the markup have no alt text.`,
       imagesMissingAlt > 0
-        ? [`${imagesMissingAlt} img tag(s) without alt`, ...images.slice(0, 3).map((tag) => clip(tag, 120))]
+        ? [
+            `${imagesMissingAlt} img tag(s) without alt`,
+            ...images.slice(0, 3).map((tag) => clip(tag, 120)),
+          ]
         : [],
       "medium",
     ),
