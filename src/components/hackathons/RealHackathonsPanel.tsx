@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import { ArrowRight, Copy, Gavel, Plus, Ticket } from "lucide-react";
 
@@ -46,6 +46,7 @@ export function RealHackathonsPanel() {
   const viewerId = portalJudgeId(user?.id ?? null);
   const queryClient = useQueryClient();
   const hackathons = useJudgeHackathons();
+  const navigate = useNavigate();
 
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
@@ -104,8 +105,10 @@ export function RealHackathonsPanel() {
    * One-click demo event.
    *
    * The walkthrough needs a known code (`DEMO26`) without typing anything into a
-   * form. Idempotent: a second click reuses the event that already exists instead
-   * of failing on the unique code.
+   * form, and the button must *open* the event, not just create it: the code is
+   * shown (and copyable) on the workspace header once it loads. Idempotent — a
+   * second click reuses the event that already exists instead of failing on the
+   * unique code.
    */
   const createDemo = async () => {
     setCreatingDemo(true);
@@ -124,9 +127,15 @@ export function RealHackathonsPanel() {
       }
       await queryClient.invalidateQueries({ queryKey: portalKeys.judgeHackathons(viewerId) });
       notify.success(
-        existing ? "Demo event is already open" : "Demo hackathon created",
+        existing ? "Demo event opened" : "Demo hackathon created",
         "Candidates join with DEMO26.",
       );
+      // Open the event so its code and judging queue are on screen immediately.
+      await navigate({
+        to: "/hackathons/$code",
+        params: { code: "DEMO26" },
+        search: { view: "overview" },
+      });
     } catch (cause) {
       notify.error(
         "Couldn't create the demo event",
@@ -292,6 +301,16 @@ export function RealHackathonsPanel() {
                 <Badge variant="outline" className="shrink-0 capitalize">
                   {hackathon.status}
                 </Badge>
+                <Button asChild variant="outline" size="sm">
+                  <Link
+                    to="/hackathons/$code"
+                    params={{ code: hackathon.code }}
+                    search={{ view: "overview" }}
+                  >
+                    Open
+                    <ArrowRight className="h-3.5 w-3.5" />
+                  </Link>
+                </Button>
                 <Button asChild variant="outline" size="sm">
                   <Link
                     to="/hackathons/$code"

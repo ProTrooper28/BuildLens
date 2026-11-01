@@ -68,11 +68,17 @@ export function SubmissionStatusPage({ submissionId }: { submissionId: string })
   }
 
   const { submission, hackathon, projectName, statusLabel, checks, steps, result } = data;
+  const lifecycle =
+    submission.status === "evaluated" || submission.status === "finalized"
+      ? statusLabel
+      : "Awaiting hackathon assignment";
 
   return (
     <AppLayout
       title="Submission received"
-      subtitle={`${hackathon.name} · ${hackathon.code}`}
+      subtitle={
+        hackathon ? `${hackathon.name} · ${hackathon.code}` : "No hackathon selected · Unassigned"
+      }
       crumbs={[{ label: "Dashboard", to: "/dashboard" }, { label: projectName }]}
       actions={
         <Button variant="outline" size="sm" onClick={() => void query.refetch()}>
@@ -106,10 +112,19 @@ export function SubmissionStatusPage({ submissionId }: { submissionId: string })
                     Hackathon
                   </dt>
                   <dd className="mt-0.5">
-                    {hackathon.name}{" "}
-                    <span className="font-mono text-xs text-muted-foreground">
-                      {hackathon.code}
-                    </span>
+                    {hackathon ? (
+                      <>
+                        {hackathon.name}{" "}
+                        <span className="font-mono text-xs text-muted-foreground">
+                          {hackathon.code}
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        No hackathon selected{" "}
+                        <span className="text-xs text-muted-foreground">(unassigned)</span>
+                      </>
+                    )}
                   </dd>
                 </div>
                 <div>
@@ -118,7 +133,7 @@ export function SubmissionStatusPage({ submissionId }: { submissionId: string })
                   </dt>
                   <dd className="mt-0.5">
                     <Badge variant="outline" className="text-[11px]">
-                      {statusLabel}
+                      {hackathon ? statusLabel : lifecycle}
                     </Badge>
                   </dd>
                 </div>
@@ -126,6 +141,9 @@ export function SubmissionStatusPage({ submissionId }: { submissionId: string })
               <p className="mt-3 text-xs text-muted-foreground">
                 Submitted {new Date(submission.submittedAt).toLocaleString()}. Your submission is
                 already in the judges' portal — nothing else to send.
+                {hackathon
+                  ? null
+                  : " The organizers will add it to a hackathon, and it appears in your history meanwhile."}
               </p>
             </div>
           </div>

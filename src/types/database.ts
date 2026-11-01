@@ -385,7 +385,8 @@ export interface Database {
       hackathon_submissions: {
         Row: {
           id: string;
-          hackathon_id: string;
+          // Nullable since 0008: a submission may be filed later ("unassigned").
+          hackathon_id: string | null;
           candidate_id: string;
           project_id: string | null;
           report_id: string | null;
@@ -407,7 +408,7 @@ export interface Database {
         };
         Insert: {
           id?: string;
-          hackathon_id: string;
+          hackathon_id?: string | null;
           candidate_id: string;
           project_id?: string | null;
           report_id?: string | null;
@@ -429,7 +430,7 @@ export interface Database {
         };
         Update: {
           id?: string;
-          hackathon_id?: string;
+          hackathon_id?: string | null;
           candidate_id?: string;
           project_id?: string | null;
           report_id?: string | null;

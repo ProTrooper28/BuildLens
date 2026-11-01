@@ -302,6 +302,9 @@ async function sharedProjectDetail(
   const row = await getSubmissionForJudge(submissionRowId, judgeId).catch(() => null);
   if (!row) return null;
   const { submission, hackathon } = row;
+  // An unassigned submission has no event, so it has no place in a hackathon's
+  // project list; the judge files it from the intake pool first.
+  if (!hackathon) return null;
 
   let techStack: string[] = [];
   let summary: string | null = null;

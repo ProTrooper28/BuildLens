@@ -10,9 +10,11 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { createGuestReport } from "@/services/guest.service";
 import {
+  assignSubmissionHackathon,
   createHackathon,
   findHackathonByCode,
   getSubmissionForCandidate,
+  listUnassignedSubmissions,
   resetPortalStorageState,
   setPublishedResult,
   submitToHackathon,
@@ -208,7 +210,8 @@ describe("candidate status", () => {
     const status = await fetchCandidateStatus(submission.id, CANDIDATE, CANDIDATE_VIEWER);
     expect(status).not.toBeNull();
     expect(status?.projectName).toBe("Ledger Lens");
-    expect(status?.hackathon.code).toBe("DEMO26");
+    // Submitted with a code, so the status page names that event.
+    expect(status?.hackathon?.code).toBe("DEMO26");
 
     const checks = new Map(status?.checks.map((check) => [check.key, check.state]));
     expect(checks.get("deck")).toBe("ok");
@@ -254,5 +257,122 @@ describe("candidate status", () => {
         isGuest: false,
       }),
     ).toBeNull();
+  });
+});
+
+describe("unassigned submissions", () => {
+  async function seedUnassigned(teamName = "Team Solo") {
+    const report = seedReport();
+    return submitToHackathon({
+      hackathonId: null,
+      candidateId: CANDIDATE,
+      teamName,
+      teamMembers: ["Linus"],
+      description: "Finished project, no code typed.",
+      repoUrl: "https://github.com/team/solo",
+      websiteUrl: "https://solo.example.com",
+      deckName: "solo.pptx",
+      projectId: "project-row-solo",
+      reportId: report.id,
+    });
+  }
+
+  it("files a submission without a code and never puts it in a hackathon queue", async () => {
+    const submission = await seedUnassigned();
+    expect(submission.hackathonId).toBeNull();
+
+    // The candidate's own status page reads it, naming no event.
+    const status = await fetchCandidateStatus(submission.id, CANDIDATE, CANDIDATE_VIEWER);
+    expect(status?.hackathon).toBeNull();
+
+    // The judge sees it in the intake pool …
+    const pool = await listUnassignedSubmissions(JUDGE);
+    expect(pool.map((entry) => entry.submission.id)).toContain(submission.id);
+
+    // … and no hackathon's queue contains it, whatever code is opened.
+    const demo = await seedHackathon();
+    const rows = await fetchHackathonWorkspace(demo.code, VIEWER);
+    expect(rows?.rows.map((row) => row.submission.id)).not.toContain(submission.id);
+  });
+
+  it("moves the same record into a hackathon when a judge assigns it", async () => {
+    const submission = await seedUnassigned();
+    const demo = await seedHackathon();
+
+    const assigned = await assignSubmissionHackathon(submission.id, JUDGE, demo.id);
+    expect(assigned?.hackathon?.code).toBe("DEMO26");
+    expect(assigned?.submission.id).toBe(submission.id);
+
+    // Out of the pool, into that event's judging queue — and onto the
+    // candidate's status page, without resubmitting anything.
+    expect(
+      (await listUnassignedSubmissions(JUDGE)).map((entry) => entry.submission.id),
+    ).not.toContain(submission.id);
+    const rows = await fetchHackathonWorkspace("DEMO26", VIEWER);
+    expect(rows?.rows.map((row) => row.submission.id)).toContain(submission.id);
+    const status = await fetchCandidateStatus(submission.id, CANDIDATE, CANDIDATE_VIEWER);
+    expect(status?.hackathon?.code).toBe("DEMO26");
+  });
+
+  it("refuses a judge who does not organize the target event", async () => {
+    const submission = await seedUnassigned();
+    const demo = await seedHackathon();
+
+    await expect(assignSubmissionHackathon(submission.id, "judge-b", demo.id)).rejects.toThrow(
+      /do not judge/i,
+    );
+    expect((await listUnassignedSubmissions(JUDGE)).map((entry) => entry.submission.id)).toContain(
+      submission.id,
+    );
+  });
+
+  it("refuses a second submission for a team already in that hackathon", async () => {
+    const { hackathon } = await seedSubmission();
+    const second = await seedUnassigned();
+
+    await expect(assignSubmissionHackathon(second.id, JUDGE, hackathon.id)).rejects.toThrow(
+      /already has a submission/i,
+    );
+  });
+
+  it("can move an assigned submission back into the pool", async () => {
+    const { submission } = await seedSubmission();
+
+    const moved = await assignSubmissionHackathon(submission.id, JUDGE, null);
+    expect(moved?.submission.hackathonId).toBeNull();
+    expect((await listUnassignedSubmissions(JUDGE)).map((entry) => entry.submission.id)).toContain(
+      submission.id,
+    );
+    const rows = await fetchHackathonWorkspace("DEMO26", VIEWER);
+    expect(rows?.rows).toEqual([]);
+  });
+
+  it("keeps two hackathons' projects completely separate", async () => {
+    // seedSubmission creates DEMO26 with Team Alpha's project …
+    const inDemo = await seedSubmission();
+    const sih = await createHackathon(
+      { id: JUDGE, name: "Organizer" },
+      { name: "SIH 2026", code: "SIH26" },
+    );
+    const report = seedReport();
+    const inSih = await submitToHackathon({
+      hackathonId: sih.id,
+      candidateId: OTHER_CANDIDATE,
+      teamName: "Team Beta",
+      teamMembers: ["Radia"],
+      description: "Second event, second team.",
+      repoUrl: "https://github.com/team/beta",
+      websiteUrl: "https://beta.example.com",
+      deckName: "beta.pptx",
+      projectId: "project-row-beta",
+      reportId: report.id,
+    });
+
+    // …and each event's queue holds exactly its own project.
+    expect(inDemo.hackathon.code).toBe("DEMO26");
+    const demoRows = await fetchHackathonWorkspace("DEMO26", VIEWER);
+    expect(demoRows?.rows.map((row) => row.submission.id)).toEqual([inDemo.submission.id]);
+    const sihRows = await fetchHackathonWorkspace("SIH26", VIEWER);
+    expect(sihRows?.rows.map((row) => row.submission.id)).toEqual([inSih.id]);
   });
 });

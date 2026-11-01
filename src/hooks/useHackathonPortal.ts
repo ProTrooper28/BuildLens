@@ -1,7 +1,8 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { useAuth } from "@/hooks/useAuth";
 import {
+  assignSubmissionHackathon,
   listCandidateSubmissions,
   listJudgeHackathons,
   portalCandidateId,
@@ -11,6 +12,7 @@ import {
   fetchCandidateStatus,
   fetchHackathonWorkspace,
   fetchJudgeProject,
+  fetchUnassignedSubmissions,
 } from "@/services/portal.service";
 
 /**
@@ -33,6 +35,7 @@ export const portalKeys = {
     ["hackathon", "project", code.toUpperCase(), submissionId, viewerId] as const,
   candidateStatus: (submissionId: string, candidateId: string) =>
     ["hackathon", "candidate-status", submissionId, candidateId] as const,
+  unassigned: (viewerId: string) => ["hackathon", "unassigned", viewerId] as const,
 };
 
 /** The logged-in candidate's own submissions (and their hackathons). */
@@ -102,6 +105,47 @@ export function useCandidateStatus(submissionId: string) {
     refetchInterval: (query) => {
       const status = query.state.data?.submission.status;
       return status === "submitted" || status === "processing" ? 5_000 : false;
+    },
+  });
+}
+
+/** Projects submitted without a code — the organizer's intake pool. */
+export function useUnassignedSubmissions() {
+  const { user, isGuest } = useAuth();
+  const viewerId = portalJudgeId(user?.id ?? null);
+
+  return useQuery({
+    queryKey: portalKeys.unassigned(viewerId || "none"),
+    queryFn: () => fetchUnassignedSubmissions({ userId: user?.id ?? null, isGuest }),
+    enabled: Boolean(viewerId),
+    staleTime: 10_000,
+    refetchOnWindowFocus: false,
+  });
+}
+
+/**
+ * File a submission under a hackathon (or back into the pool).
+ *
+ * Every portal read of that submission is invalidated: the candidate's history,
+ * the intake list, the hackathon workspace and any open project page.
+ */
+export function useAssignSubmission() {
+  const { user } = useAuth();
+  const viewerId = portalJudgeId(user?.id ?? null);
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (input: { submissionId: string; hackathonId: string | null }) => {
+      const result = await assignSubmissionHackathon(
+        input.submissionId,
+        viewerId,
+        input.hackathonId,
+      );
+      if (!result) throw new Error("That submission could not be moved.");
+      return result;
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["hackathon"] });
     },
   });
 }

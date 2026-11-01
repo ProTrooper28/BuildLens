@@ -4,6 +4,7 @@ import {
   ArrowRight,
   CheckCircle2,
   ClipboardList,
+  Copy,
   Hash,
   RefreshCw,
   Ticket,
@@ -17,6 +18,7 @@ import { Button } from "@/components/ui/button";
 import { useJudgeWorkspace } from "@/hooks/useHackathonPortal";
 import { portalStorageNotice, submissionStatusLabel } from "@/services/hackathon.service";
 import type { JudgeSubmissionRow } from "@/services/portal.service";
+import { notify } from "@/lib/toast-messages";
 import { cn } from "@/lib/utils";
 
 /**
@@ -51,6 +53,13 @@ function scoreText(score: number | null, max: number | null): string {
 export function RealHackathonWorkspace({ code }: { code: string }) {
   const workspace = useJudgeWorkspace(code);
   const notice = portalStorageNotice();
+
+  const copyCode = (value: string) => {
+    void navigator.clipboard?.writeText(value).then(
+      () => notify.copied("hackathon code"),
+      () => notify.info("Hackathon code", value),
+    );
+  };
 
   if (workspace.isLoading) {
     return (
@@ -105,9 +114,16 @@ export function RealHackathonWorkspace({ code }: { code: string }) {
       crumbs={[{ label: "Hackathons", to: "/hackathons" }, { label: hackathon.name }]}
       actions={
         <div className="flex flex-wrap items-center gap-2">
-          <Badge variant="outline" className="font-mono tracking-[0.14em]">
+          <button
+            type="button"
+            onClick={() => copyCode(hackathon.code)}
+            title="Copy join code"
+            aria-label={`Copy join code ${hackathon.code}`}
+            className="inline-flex items-center gap-1.5 rounded-md border border-border/70 bg-muted/40 px-2.5 py-1 font-mono text-xs tracking-[0.14em] transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
             {hackathon.code}
-          </Badge>
+            <Copy className="h-3 w-3" aria-hidden />
+          </button>
           <Button variant="outline" size="sm" onClick={() => void workspace.refetch()}>
             <RefreshCw className="h-4 w-4" /> Refresh
           </Button>

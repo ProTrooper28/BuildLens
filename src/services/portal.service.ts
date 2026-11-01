@@ -28,6 +28,7 @@ import {
   isStatusAtLeast,
   listJudgeHackathons,
   listJudgeSubmissions,
+  listUnassignedSubmissions,
   portalJudgeId,
   submissionStatusLabel,
 } from "@/services/hackathon.service";
@@ -232,7 +233,9 @@ export async function fetchJudgeProject(
   const row = await getSubmissionForJudge(submissionId, judgeId).catch(() => null);
   if (!row) return null;
   // The page is scoped by code: a submission opened under the wrong hackathon is
-  // not the page the judge meant, so it is treated as missing.
+  // not the page the judge meant, so it is treated as missing. Unassigned ones
+  // have no page here — they are filed first, from the intake list.
+  if (!row.hackathon) return null;
   if (row.hackathon.code.toUpperCase() !== code.trim().toUpperCase()) return null;
 
   const report = await readReport(row.submission.reportId, viewer);
@@ -282,7 +285,8 @@ export interface SubmissionStep {
 }
 
 export interface CandidateStatus {
-  hackathon: Hackathon;
+  /** `null` when the project was submitted without a hackathon code. */
+  hackathon: Hackathon | null;
   submission: HackathonSubmission;
   /** The project name the candidate entered (falls back to the team name). */
   projectName: string;
@@ -457,6 +461,41 @@ export async function fetchCandidateStatus(
     steps: stepStates(row.submission, view, readiness),
     result: row.submission.resultPublished ? row.submission.publishedResult : null,
   };
+}
+
+/**
+ * The intake pool: projects submitted without a code, as the judge sees them.
+ *
+ * Same read layer as everything else — the rows are the candidate's real
+ * submission records, and assigning one only changes its `hackathon_id`.
+ */
+export interface UnassignedSubmissionRow {
+  submission: HackathonSubmission;
+  projectName: string | null;
+  analysis: AnalysisReadiness;
+  aiScore: number | null;
+  reportId: string | null;
+}
+
+export async function fetchUnassignedSubmissions(
+  viewer: PortalViewer,
+): Promise<UnassignedSubmissionRow[]> {
+  const judgeId = portalJudgeId(viewer.userId);
+  const submissions = await listUnassignedSubmissions(judgeId).catch(() => []);
+  const reports = await Promise.all(
+    submissions.map(({ submission }) => readReport(submission.reportId, viewer)),
+  );
+
+  return submissions.map(({ submission }, index) => {
+    const report = reports[index] ?? null;
+    return {
+      submission,
+      projectName: report?.name ?? null,
+      analysis: readinessOf(report),
+      aiScore: aiScoreOf(report),
+      reportId: submission.reportId,
+    };
+  });
 }
 
 /** Statuses a candidate may see on their own page (judge-side states are mapped). */

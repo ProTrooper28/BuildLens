@@ -21,7 +21,7 @@ export function SubmissionLifecycleCard({
   hackathon,
   submission,
 }: {
-  hackathon: Hackathon;
+  hackathon: Hackathon | null;
   submission: HackathonSubmission;
 }) {
   const stage = lifecycleStage(submission.status);
@@ -34,7 +34,13 @@ export function SubmissionLifecycleCard({
         <div className="min-w-0">
           <h3 className="truncate font-medium">{submission.teamName}</h3>
           <p className="mt-0.5 text-xs text-muted-foreground">
-            {hackathon.name} · <span className="font-mono">{hackathon.code}</span>
+            {hackathon ? (
+              <>
+                {hackathon.name} · <span className="font-mono">{hackathon.code}</span>
+              </>
+            ) : (
+              <span className="text-warning">Unassigned · awaiting hackathon assignment</span>
+            )}
           </p>
         </div>
         <Badge variant="outline" className="shrink-0">

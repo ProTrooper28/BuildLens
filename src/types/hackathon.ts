@@ -159,7 +159,12 @@ export interface PublishedResult {
  */
 export interface HackathonSubmission {
   id: string;
-  hackathonId: string;
+  /**
+   * The hackathon this submission is filed under, or `null` while it is still
+   * unassigned: the candidate did not know a code, and an organizer attaches the
+   * project to an event later from the judge portal's intake list.
+   */
+  hackathonId: string | null;
   candidateId: string;
   projectId: string | null;
   reportId: string | null;
@@ -180,11 +185,19 @@ export interface HackathonSubmission {
   updatedAt: string;
 }
 
-/** A submission joined with its hackathon — what the candidate portal lists. */
+/**
+ * A submission joined with its hackathon — what the portals list.
+ *
+ * `hackathon` is `null` for an unassigned submission (a project submitted
+ * without a code) until an organizer assigns it.
+ */
 export interface CandidateSubmission {
   submission: HackathonSubmission;
-  hackathon: Hackathon;
+  hackathon: Hackathon | null;
 }
+
+/** A judge-side submission row; same shape, named for the judge portal. */
+export type JudgeSubmission = CandidateSubmission;
 
 /** A hackathon plus how much has been submitted to it (organizer view). */
 export interface HackathonSummary extends Hackathon {
@@ -204,9 +217,10 @@ export interface CreateHackathonInput {
   maxScore?: number;
 }
 
-/** What a candidate sends when they submit a project to a hackathon. */
+/** What a candidate sends when they submit a project for judging. */
 export interface SubmitProjectInput {
-  hackathonId: string;
+  /** Omitted or `null` files the project as unassigned, to be sorted later. */
+  hackathonId?: string | null;
   candidateId: string;
   teamName: string;
   teamMembers?: string[];

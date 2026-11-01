@@ -123,7 +123,7 @@ describe("candidate submission → judge portal", () => {
     expect(opened?.submission.websiteUrl).toBe("https://ledger.example.com");
     expect(opened?.submission.deckName).toBe("ledger-lens.pptx");
     expect(opened?.submission.teamMembers).toEqual(["Ada", "Grace"]);
-    expect(opened?.hackathon.code).toBe(hackathon.code);
+    expect(opened?.hackathon?.code).toBe(hackathon.code);
   });
 
   it("feeds the judging list and detail with the shared submission", async () => {

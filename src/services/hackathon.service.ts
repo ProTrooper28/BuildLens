@@ -34,6 +34,7 @@ import type {
   HackathonStatus,
   HackathonSubmission,
   HackathonSummary,
+  JudgeSubmission,
   PublishedResult,
   SubmissionStatus,
   SubmitProjectInput,
@@ -344,7 +345,7 @@ function toSubmission(row: HackathonSubmissionRow): HackathonSubmission {
       : null;
   return {
     id: row.id,
-    hackathonId: row.hackathon_id,
+    hackathonId: row.hackathon_id ?? null,
     candidateId: row.candidate_id,
     projectId: row.project_id,
     reportId: row.report_id,
@@ -386,37 +387,57 @@ export async function createHackathon(
 ): Promise<Hackathon> {
   const name = input.name.trim();
   if (name.length < 2) throw new Error("A hackathon needs a name.");
-  const code = normaliseJoinCode(input.code ?? "") || generateJoinCode(name);
+  // A code the user chose is theirs to keep (or collide with); a generated one
+  // is disposable, so a collision regenerates it instead of failing.
+  const chosenCode = normaliseJoinCode(input.code ?? "");
+  const codeIsGenerated = !chosenCode;
+  let code = chosenCode || generateJoinCode(name);
   const rubric = input.criteria?.length ? input.criteria : defaultCriteriaSet("project").criteria;
   const maxScore = clampMax(input.maxScore ?? defaultCriteriaSet("project").maxScore);
+
+  const collision = (codeIsYours: boolean) => {
+    if (codeIsYours) throw new Error(`The code ${code} is already in use.`);
+    code = generateJoinCode(name);
+  };
 
   return runPortal(
     canUseRemotePortal(organizer.id),
     async () => {
       const supabase = getSupabase();
-      const { data, error } = await supabase
-        .from("hackathons")
-        .insert({
-          code,
-          name,
-          description: input.description ?? null,
-          status: (input.status ?? "open") as HackathonStatusRow,
-          starts_at: input.startsAt ?? null,
-          ends_at: input.endsAt ?? null,
-          criteria: rubric as never,
-          max_score: maxScore,
-          created_by: organizer.id,
-        })
-        .select("*")
-        .single();
-      if (error) throw new Error(error.message);
-      if (!data) throw new Error("The hackathon was not created.");
-      return toHackathon(data);
+      // The unique index is on `upper(code)`, so a rare generated collision is
+      // retried with a fresh suffix rather than surfaced to the organizer.
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const { data, error } = await supabase
+          .from("hackathons")
+          .insert({
+            code,
+            name,
+            description: input.description ?? null,
+            status: (input.status ?? "open") as HackathonStatusRow,
+            starts_at: input.startsAt ?? null,
+            ends_at: input.endsAt ?? null,
+            criteria: rubric as never,
+            max_score: maxScore,
+            created_by: organizer.id,
+          })
+          .select("*")
+          .single();
+        if (error) {
+          if ((error as { code?: string }).code === "23505") {
+            collision(!codeIsGenerated);
+            continue;
+          }
+          throw new Error(error.message);
+        }
+        if (!data) throw new Error("The hackathon was not created.");
+        return toHackathon(data);
+      }
+      throw new Error("The code could not be generated. Try a different one.");
     },
     () => {
       const journal = readJournal();
-      if (journal.hackathons.some((entry) => entry.code.toUpperCase() === code)) {
-        throw new Error(`The code ${code} is already in use.`);
+      while (journal.hackathons.some((entry) => entry.code.toUpperCase() === code)) {
+        collision(!codeIsGenerated);
       }
       const timestamp = nowIso();
       const hackathon: Hackathon = {
@@ -502,8 +523,8 @@ export async function listJudgeHackathons(viewerId: string): Promise<HackathonSu
 function summarise(
   hackathon: Hackathon,
   submissions: {
-    hackathon_id?: string;
-    hackathonId?: string;
+    hackathon_id?: string | null;
+    hackathonId?: string | null;
     status: SubmissionStatusRow | SubmissionStatus;
   }[],
 ): HackathonSummary {
@@ -639,11 +660,14 @@ export async function listHackathonJudges(
 export async function submitToHackathon(input: SubmitProjectInput): Promise<HackathonSubmission> {
   const teamName = input.teamName.trim();
   if (teamName.length < 2) throw new Error("A submission needs a project or team name.");
-  if (!input.hackathonId) throw new Error("Choose a hackathon first.");
-  if (!input.candidateId) throw new Error("Sign in to submit to a hackathon.");
+  if (!input.candidateId) throw new Error("Sign in to submit a project.");
+
+  // The code is optional: without one the project is filed as unassigned and an
+  // organizer attaches it to an event later.
+  const hackathonId = input.hackathonId ?? null;
 
   const payload = {
-    hackathon_id: input.hackathonId,
+    hackathon_id: hackathonId,
     candidate_id: input.candidateId,
     project_id: input.projectId ?? null,
     report_id: input.reportId ?? null,
@@ -661,27 +685,33 @@ export async function submitToHackathon(input: SubmitProjectInput): Promise<Hack
     canUseRemotePortal(input.candidateId),
     async () => {
       const supabase = getSupabase();
-      const { data, error } = await supabase
-        .from("hackathon_submissions")
-        .upsert(payload, { onConflict: "hackathon_id,candidate_id" })
-        .select("*")
-        .single();
+      // One row per candidate per hackathon; an unassigned project has no
+      // hackathon to conflict on, so it is inserted like any other record.
+      const { data, error } = hackathonId
+        ? await supabase
+            .from("hackathon_submissions")
+            .upsert(payload, { onConflict: "hackathon_id,candidate_id" })
+            .select("*")
+            .single()
+        : await supabase.from("hackathon_submissions").insert(payload).select("*").single();
       if (error) throw new Error(error.message);
       if (!data) throw new Error("The submission was not saved.");
       return toSubmission(data);
     },
     () => {
       const journal = readJournal();
-      const hackathon = journal.hackathons.find((entry) => entry.id === input.hackathonId);
-      if (!hackathon) throw new Error("That hackathon code is not valid anymore.");
-      if (hackathon.status === "complete") {
-        throw new Error(`${hackathon.name} is closed for new submissions.`);
+      if (hackathonId) {
+        const hackathon = journal.hackathons.find((entry) => entry.id === hackathonId);
+        if (!hackathon) throw new Error("That hackathon code is not valid anymore.");
+        if (hackathon.status === "complete") {
+          throw new Error(`${hackathon.name} is closed for new submissions.`);
+        }
       }
 
       const timestamp = nowIso();
       const existing = journal.submissions.find(
         (entry) =>
-          entry.hackathonId === input.hackathonId && entry.candidateId === input.candidateId,
+          (entry.hackathonId ?? null) === hackathonId && entry.candidateId === input.candidateId,
       );
       const submission: HackathonSubmission = existing
         ? {
@@ -700,7 +730,7 @@ export async function submitToHackathon(input: SubmitProjectInput): Promise<Hack
           }
         : {
             id: newId(),
-            hackathonId: input.hackathonId,
+            hackathonId,
             candidateId: input.candidateId,
             projectId: payload.project_id,
             reportId: payload.report_id,
@@ -749,30 +779,36 @@ export async function listCandidateSubmissions(
       const submissions = (data ?? []).map(toSubmission);
       if (submissions.length === 0) return [];
 
-      const { data: hackathons, error: hackathonError } = await supabase
-        .from("hackathons")
-        .select("*")
-        .in(
-          "id",
-          submissions.map((submission) => submission.hackathonId),
-        );
-      if (hackathonError) throw new Error(hackathonError.message);
-      const byId = new Map((hackathons ?? []).map((row) => [row.id, toHackathon(row)]));
+      const hackathonIds = submissions
+        .map((submission) => submission.hackathonId)
+        .filter((id): id is string => Boolean(id));
+      const byId = new Map<string, Hackathon>();
+      if (hackathonIds.length > 0) {
+        const { data: hackathons, error: hackathonError } = await supabase
+          .from("hackathons")
+          .select("*")
+          .in("id", hackathonIds);
+        if (hackathonError) throw new Error(hackathonError.message);
+        for (const row of hackathons ?? []) byId.set(row.id, toHackathon(row));
+      }
 
-      return submissions.flatMap((submission) => {
-        const hackathon = byId.get(submission.hackathonId);
-        return hackathon ? [{ submission, hackathon }] : [];
-      });
+      // An unassigned project still belongs in the candidate's history.
+      return submissions.map((submission) => ({
+        submission,
+        hackathon: submission.hackathonId ? (byId.get(submission.hackathonId) ?? null) : null,
+      }));
     },
     () => {
       const journal = readJournal();
       return journal.submissions
         .filter((submission) => submission.candidateId === candidateId)
         .sort((a, b) => b.submittedAt.localeCompare(a.submittedAt))
-        .flatMap((submission) => {
-          const hackathon = journal.hackathons.find((entry) => entry.id === submission.hackathonId);
-          return hackathon ? [{ submission, hackathon }] : [];
-        });
+        .map((submission) => ({
+          submission,
+          hackathon: submission.hackathonId
+            ? (journal.hackathons.find((entry) => entry.id === submission.hackathonId) ?? null)
+            : null,
+        }));
     },
   );
 }
@@ -811,19 +847,155 @@ export async function listJudgeSubmissions(
       if (error) throw new Error(error.message);
       return (data ?? []).flatMap((row) => {
         const submission = toSubmission(row);
-        const hackathon = byId.get(submission.hackathonId);
+        const id = submission.hackathonId;
+        const hackathon = id ? byId.get(id) : undefined;
         return hackathon ? [{ hackathon, submission }] : [];
       });
     },
     () => {
       const journal = readJournal();
       return journal.submissions
-        .filter((submission) => byId.has(submission.hackathonId))
+        .filter((submission) => submission.hackathonId !== null && byId.has(submission.hackathonId))
         .sort((a, b) => b.submittedAt.localeCompare(a.submittedAt))
         .flatMap((submission) => {
-          const hackathon = byId.get(submission.hackathonId);
+          const id = submission.hackathonId;
+          const hackathon = id ? byId.get(id) : undefined;
           return hackathon ? [{ hackathon, submission }] : [];
         });
+    },
+  );
+}
+
+/**
+ * Projects submitted without a hackathon code.
+ *
+ * They sit in a shared intake pool until an organizer files them under an event:
+ * the candidate submitted with a name, deck, repo and deployment URL, so the
+ * project is complete — it just has no home yet.
+ */
+export async function listUnassignedSubmissions(viewerId: string): Promise<JudgeSubmission[]> {
+  if (!viewerId) return [];
+
+  return runPortal(
+    canUseRemotePortal(viewerId),
+    async () => {
+      const supabase = getSupabase();
+      const { data, error } = await supabase
+        .from("hackathon_submissions")
+        .select("*")
+        .is("hackathon_id", null)
+        .order("submitted_at", { ascending: false });
+      if (error) throw new Error(error.message);
+      return (data ?? []).map((row) => ({ submission: toSubmission(row), hackathon: null }));
+    },
+    () =>
+      readJournal()
+        .submissions.filter((submission) => !submission.hackathonId)
+        .sort((a, b) => b.submittedAt.localeCompare(a.submittedAt))
+        .map((submission) => ({ submission, hackathon: null })),
+  );
+}
+
+/**
+ * File a submission under a hackathon — or, with `null`, back into the pool.
+ *
+ * This is the judge-side counterpart to the optional code: a team that did not
+ * know the code is not lost, and a project entered under the wrong event can be
+ * moved. Only an organizer/judge of the *target* event may do it, and a team
+ * that already has a submission there is refused rather than duplicated.
+ */
+export async function assignSubmissionHackathon(
+  submissionId: string,
+  viewerId: string,
+  hackathonId: string | null,
+): Promise<JudgeSubmission | null> {
+  if (!viewerId) return null;
+
+  const visible = await getSubmissionForJudge(submissionId, viewerId);
+  if (!visible) return null;
+
+  if (!hackathonId) {
+    if (!visible.submission.hackathonId) return visible;
+    return patchSubmissionHackathon(submissionId, visible.submission.candidateId, null, viewerId);
+  }
+
+  const target = await listJudgeHackathons(viewerId);
+  const allowed = target.find((entry) => entry.id === hackathonId);
+  if (!allowed) throw new Error("You do not judge that hackathon.");
+  if (visible.submission.hackathonId === hackathonId) return visible;
+
+  return patchSubmissionHackathon(
+    submissionId,
+    visible.submission.candidateId,
+    hackathonId,
+    viewerId,
+  );
+}
+
+/** Shared write for `assignSubmissionHackathon`, after the access checks. */
+async function patchSubmissionHackathon(
+  submissionId: string,
+  candidateId: string,
+  hackathonId: string | null,
+  viewerId: string,
+): Promise<JudgeSubmission | null> {
+  return runPortal(
+    canUseRemotePortal(viewerId),
+    async () => {
+      const supabase = getSupabase();
+      const { data, error } = await supabase
+        .from("hackathon_submissions")
+        .update({ hackathon_id: hackathonId })
+        .eq("id", submissionId)
+        .select("*")
+        .maybeSingle();
+      if (error) {
+        if ((error as { code?: string }).code === "23505") {
+          throw new Error("That team already has a submission in this hackathon.");
+        }
+        throw new Error(error.message);
+      }
+      if (!data) return null;
+      const hackathon = hackathonId
+        ? await supabase
+            .from("hackathons")
+            .select("*")
+            .eq("id", hackathonId)
+            .maybeSingle()
+            .then(({ data: row }) => (row ? toHackathon(row) : null))
+        : null;
+      return { submission: toSubmission(data), hackathon };
+    },
+    () => {
+      const journal = readJournal();
+      const existing = journal.submissions.find((entry) => entry.id === submissionId);
+      if (!existing || existing.candidateId !== candidateId) return null;
+      if (hackathonId && !journal.hackathons.some((entry) => entry.id === hackathonId)) {
+        throw new Error("That hackathon no longer exists.");
+      }
+      if (
+        hackathonId &&
+        journal.submissions.some(
+          (entry) =>
+            entry.id !== submissionId &&
+            entry.hackathonId === hackathonId &&
+            entry.candidateId === candidateId,
+        )
+      ) {
+        throw new Error("That team already has a submission in this hackathon.");
+      }
+
+      const updated: HackathonSubmission = { ...existing, hackathonId, updatedAt: nowIso() };
+      journal.submissions = journal.submissions.map((entry) =>
+        entry.id === submissionId ? updated : entry,
+      );
+      writeJournal(journal);
+      return {
+        submission: updated,
+        hackathon: hackathonId
+          ? (journal.hackathons.find((entry) => entry.id === hackathonId) ?? null)
+          : null,
+      };
     },
   );
 }
@@ -832,7 +1004,7 @@ export async function listJudgeSubmissions(
 export async function getSubmissionForJudge(
   submissionId: string,
   viewerId: string,
-): Promise<{ hackathon: Hackathon; submission: HackathonSubmission } | null> {
+): Promise<JudgeSubmission | null> {
   if (!viewerId) return null;
 
   return runPortal(
@@ -847,28 +1019,35 @@ export async function getSubmissionForJudge(
       if (error) throw new Error(error.message);
       if (!data) return null;
 
-      const { data: hackathon, error: hackathonError } = await supabase
-        .from("hackathons")
-        .select("*")
-        .eq("id", data.hackathon_id)
-        .maybeSingle();
+      // An unassigned submission lives in the shared intake pool: any judge may
+      // open it in order to file it under one of their events.
+      const hackathonId = (data.hackathon_id as string | null) ?? null;
+      const { data: hackathon, error: hackathonError } = hackathonId
+        ? await supabase.from("hackathons").select("*").eq("id", hackathonId).maybeSingle()
+        : { data: null, error: null };
       if (hackathonError) throw new Error(hackathonError.message);
-      if (!hackathon) return null;
+      if (hackathonId && !hackathon) return null;
 
-      // RLS already limits both reads; this keeps the contract explicit.
-      const { data: allowed, error: allowedError } = await supabase.rpc("is_hackathon_judge", {
-        hackathon: data.hackathon_id,
-        uid: viewerId,
-      });
-      if (allowedError) throw new Error(allowedError.message);
-      if (!allowed) return null;
+      if (hackathonId) {
+        // RLS already limits both reads; this keeps the contract explicit.
+        const { data: allowed, error: allowedError } = await supabase.rpc("is_hackathon_judge", {
+          hackathon: hackathonId,
+          uid: viewerId,
+        });
+        if (allowedError) throw new Error(allowedError.message);
+        if (!allowed) return null;
+      }
 
-      return { hackathon: toHackathon(hackathon), submission: toSubmission(data) };
+      return {
+        hackathon: hackathon ? toHackathon(hackathon) : null,
+        submission: toSubmission(data),
+      };
     },
     () => {
       const journal = readJournal();
       const submission = journal.submissions.find((entry) => entry.id === submissionId);
       if (!submission) return null;
+      if (!submission.hackathonId) return { hackathon: null, submission };
       if (!localCanJudge(journal, submission.hackathonId, viewerId)) return null;
       const hackathon = journal.hackathons.find((entry) => entry.id === submission.hackathonId);
       return hackathon ? { hackathon, submission } : null;
@@ -880,7 +1059,7 @@ export async function getSubmissionForJudge(
 export async function getSubmissionForCandidate(
   submissionId: string,
   candidateId: string,
-): Promise<CandidateSubmission | null> {
+): Promise<JudgeSubmission | null> {
   if (!candidateId) return null;
 
   return runPortal(
@@ -896,14 +1075,15 @@ export async function getSubmissionForCandidate(
       if (error) throw new Error(error.message);
       if (!data) return null;
 
-      const { data: hackathon, error: hackathonError } = await supabase
-        .from("hackathons")
-        .select("*")
-        .eq("id", data.hackathon_id)
-        .maybeSingle();
+      const hackathonId = (data.hackathon_id as string | null) ?? null;
+      const { data: hackathon, error: hackathonError } = hackathonId
+        ? await supabase.from("hackathons").select("*").eq("id", hackathonId).maybeSingle()
+        : { data: null, error: null };
       if (hackathonError) throw new Error(hackathonError.message);
-      if (!hackathon) return null;
-      return { submission: toSubmission(data), hackathon: toHackathon(hackathon) };
+      return {
+        submission: toSubmission(data),
+        hackathon: hackathon ? toHackathon(hackathon) : null,
+      };
     },
     () => {
       const journal = readJournal();
@@ -911,8 +1091,10 @@ export async function getSubmissionForCandidate(
         (entry) => entry.id === submissionId && entry.candidateId === candidateId,
       );
       if (!submission) return null;
-      const hackathon = journal.hackathons.find((entry) => entry.id === submission.hackathonId);
-      return hackathon ? { submission, hackathon } : null;
+      const hackathon = submission.hackathonId
+        ? (journal.hackathons.find((entry) => entry.id === submission.hackathonId) ?? null)
+        : null;
+      return { submission, hackathon };
     },
   );
 }
@@ -951,6 +1133,8 @@ export async function advanceSubmissionStatus(
       const journal = readJournal();
       const existing = journal.submissions.find((entry) => entry.id === submissionId);
       if (!existing) return null;
+      // Scoring an unassigned project is what assigning it is for.
+      if (!existing.hackathonId) return null;
       if (!localCanJudge(journal, existing.hackathonId, viewerId)) return null;
       if (isStatusAtLeast(existing.status, status)) return existing;
 
@@ -1065,6 +1249,9 @@ export async function setPublishedResult(
       const journal = readJournal();
       const existing = journal.submissions.find((entry) => entry.id === submissionId);
       if (!existing) return null;
+      // Unassigned rows have no event, so there is no judge context to publish
+      // a result from; they must be filed under a hackathon first.
+      if (!existing.hackathonId) return null;
       if (!localCanJudge(journal, existing.hackathonId, viewerId)) return null;
 
       const updated: HackathonSubmission = {

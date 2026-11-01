@@ -63,7 +63,7 @@ describe("guest project submission flow", () => {
     window.localStorage.clear();
     window.localStorage.setItem(GUEST_KEY, "true");
     resetPortalStorageState();
-    // A submission only exists inside a hackathon, so the flow starts with one.
+    // The demo event is what the code in this flow will resolve to.
     await createHackathon(
       { id: "local-judge", name: "Organizer" },
       { name: "Demo Hackathon 2026", code: "DEMO26" },
@@ -80,7 +80,7 @@ describe("guest project submission flow", () => {
     const codeInput = screen.getByLabelText(/Hackathon code/i);
     fireEvent.change(codeInput, { target: { value: "DEMO26" } });
     fireEvent.blur(codeInput);
-    await screen.findByText(/Submitting to Demo Hackathon 2026/i, undefined, { timeout: 4000 });
+    await screen.findByText(/Linked to Demo Hackathon 2026/i, undefined, { timeout: 4000 });
     fireEvent.change(screen.getByLabelText(/Project Name/i), {
       target: { value: "Atlas — Climate Risk Dashboard" },
     });
@@ -139,6 +139,60 @@ describe("guest project submission flow", () => {
     expect((await screen.findAllByText(/SUBMISSION RECEIVED/i)).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/Demo Hackathon 2026/i).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/Team Atlas/).length).toBeGreaterThan(0);
+
+    expect(getSupabase).not.toHaveBeenCalled();
+  }, 15000);
+
+  it("warns about an unknown code but still submits as unassigned", async () => {
+    const router = await renderRoute("/review/project");
+
+    // An unknown code is a warning with a way forward, never a blocker.
+    const codeInput = screen.getByLabelText(/Hackathon code/i);
+    fireEvent.change(codeInput, { target: { value: "NOPE99" } });
+    fireEvent.blur(codeInput);
+    await screen.findByText(
+      /No hackathon found for this code\. You can remove the code and submit without a hackathon, or check the code\./i,
+      undefined,
+      { timeout: 4000 },
+    );
+
+    fireEvent.change(screen.getByLabelText(/Project Name/i), {
+      target: { value: "Drift — Tide Atlas" },
+    });
+    fireEvent.change(screen.getByLabelText(/Team name/i), {
+      target: { value: "Team Drift" },
+    });
+    fireEvent.change(screen.getByLabelText(/GitHub Repository URL/i), {
+      target: { value: "https://github.com/acme/drift" },
+    });
+    fireEvent.change(screen.getByLabelText(/Live Website URL/i), {
+      target: { value: "https://drift.example.com" },
+    });
+
+    const file = new File(["%PDF-1.4"], "pitch.pdf", { type: "application/pdf" });
+    setFiles(document.querySelector("#deck") as HTMLInputElement, [file]);
+
+    const submit = await screen.findByRole(
+      "button",
+      { name: /Analyze Project/i },
+      { timeout: 4000 },
+    );
+    await waitFor(() => expect(submit).toBeEnabled(), { timeout: 4000 });
+    fireEvent.click(submit);
+
+    // The submission is filed anyway — unassigned, on the status page.
+    await waitFor(
+      () => expect(router.state.location.pathname.startsWith("/submission/")).toBe(true),
+      { timeout: 4000 },
+    );
+    expect((await screen.findAllByText(/SUBMISSION RECEIVED/i)).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/No hackathon selected/i).length).toBeGreaterThan(0);
+
+    const { listCandidateSubmissions } = await import("@/services/hackathon.service");
+    const history = await listCandidateSubmissions("local-candidate");
+    expect(history).toHaveLength(1);
+    expect(history[0]?.hackathon).toBeNull();
+    expect(history[0]?.submission.teamName).toBe("Team Drift");
 
     expect(getSupabase).not.toHaveBeenCalled();
   }, 15000);
