@@ -23,7 +23,7 @@ import type { Json, Project, Report, ReportStatus, ReportType } from "@/types/da
  * Records mirror the table rows minus `user_id`, so the dashboard, report list and
  * report page render them with the same code paths.
  */
-export type GuestProject = Omit<Project, "user_id">;
+export type GuestProject = Omit<Project, "user_id" | "source">;
 export type GuestReport = Omit<Report, "user_id">;
 
 export interface GuestProjectInput {

@@ -13,6 +13,16 @@ export type ReportType = "Project" | "Developer";
 export type ReportStatus = "Completed" | "In Progress" | "Failed";
 export type ProjectStatus = "draft" | "in_review" | "completed";
 
+/**
+ * Where a project row came from.
+ *
+ * `project_manager` rows are workspace-managed work and are the only rows the
+ * Projects listing returns. `candidate_submission` rows are the backing record
+ * of a hackathon submission: readable by id (status page, progress, judge
+ * detail) but never listed as managed projects.
+ */
+export type ProjectSource = "project_manager" | "candidate_submission";
+
 /** Judging additions — see supabase/migrations/0003_judging.sql. */
 export type EvaluationCategoryRow = "resume" | "project";
 export type EvaluationRecordStatus = "in_progress" | "evaluated" | "reviewed";
@@ -72,6 +82,7 @@ export interface Database {
           website_url: string | null;
           description: string | null;
           status: ProjectStatus;
+          source: ProjectSource;
           created_at: string;
           updated_at: string;
         };
@@ -83,6 +94,7 @@ export interface Database {
           website_url?: string | null;
           description?: string | null;
           status?: ProjectStatus;
+          source?: ProjectSource;
           created_at?: string;
           updated_at?: string;
         };
@@ -94,6 +106,7 @@ export interface Database {
           website_url?: string | null;
           description?: string | null;
           status?: ProjectStatus;
+          source?: ProjectSource;
           created_at?: string;
           updated_at?: string;
         };

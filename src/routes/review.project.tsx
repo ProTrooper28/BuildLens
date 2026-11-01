@@ -16,7 +16,7 @@ import { EASE_OUT } from "@/components/motion/primitives";
 import { SubmitButton, type SubmitButtonState } from "@/components/ui/submit-button";
 import { MovingBorder } from "@/components/ui/moving-border";
 import { useAuth } from "@/hooks/useAuth";
-import { createProjectForUser } from "@/services/project.service";
+import { createCandidateProject, createProjectForUser } from "@/services/project.service";
 import { createReportForUser } from "@/services/report.service";
 import { createGuestProject, createGuestReport } from "@/services/guest.service";
 import {
@@ -112,7 +112,7 @@ function ReviewProject() {
   const errorResetTimer = useRef<number | null>(null);
   const busy = submitState === "submitting" || submitState === "processing";
 
-  const { user, isGuest, isLoading: authLoading } = useAuth();
+  const { user, isGuest, role, isLoading: authLoading } = useAuth();
 
   const repoValid = validateUrl(repo);
   const liveValid = validateUrl(live);
@@ -446,16 +446,42 @@ function ReviewProject() {
         return;
       }
 
-      const project = await createProjectForUser(user.id, {
-        name: name.trim(),
-        repo_url: repo.trim() || null,
-        website_url: live.trim() || null,
-        description: notes.trim() || null,
-        status: "draft",
-      });
+      // The project row backs the hackathon submission, so it is tagged as a
+      // candidate submission — the Projects listing never shows it, while the
+      // status page, progress and the judge's detail view still read it by id.
+      // Tag the project row by the workflow that created it: the project page
+      // must never list it for candidates (source = candidate_submission) but
+      // must list it for the project manager. Signing in is required to list it
+      // as managed work; candidates always file a submission here.
+      // A manager who filed into a hackathon by typing a code is acting as a
+      // candidate for that submission (the project is tagged candidate_submission
+      // and appears in the hackathon, never the Projects list). A manager who did
+      // not type a code creates managed work (project_manager) with no submission.
+      // Candidates always file; guests always file; managers only file when they
+      // typed a code.
+      const submitForHackathon =
+        !isGuest && role === "manager"
+          ? joinCode.trim().length > 0
+          : true;
 
-      // The investigation produces a report for this project; create it through the
-      // report service so /progress can carry its real id on to /report/$id.
+      const project = submitForHackathon
+        ? await createCandidateProject(user.id, {
+            name: name.trim(),
+            repo_url: repo.trim() || null,
+            website_url: live.trim() || null,
+            description: notes.trim() || null,
+            status: "draft",
+          })
+        : await createProjectForUser(user.id, {
+            name: name.trim(),
+            repo_url: repo.trim() || null,
+            website_url: live.trim() || null,
+            description: notes.trim() || null,
+            status: "draft",
+          });
+
+      // The investigation produces a report for this project behind a real id
+      // so /progress and /report/$id can carry it.
       const report = await createReportForUser(user.id, {
         type: "Project",
         name: project.name,
@@ -464,22 +490,50 @@ function ReviewProject() {
         report_data: reportData,
       });
 
-      // The submission is the judge portal's record. It is idempotent per
-      // (hackathon, candidate), so a retried submit updates one row.
-      const candidateId = portalCandidateId(user.id, false);
-      const hackathonSubmission = await submitToHackathon({
-        hackathonId: target?.id ?? null,
-        candidateId,
-        teamName: teamName.trim() || project.name,
-        teamMembers,
-        description: project.description,
-        repoUrl: project.repo_url,
-        websiteUrl: project.website_url,
-        deckName: deckFile?.name ?? null,
-        projectId: project.id,
-        reportId: report.id,
-      });
-      await syncSubmissionProgress(hackathonSubmission.id, candidateId, { status: "processing" });
+      // For project-manager work the report is the atomic unit: there is no
+      // hackathon submission row, the project never leaves the Projects list, and
+      // the manager lands straight on /progress. Only candidates (or a manager who
+      // deliberately filed into a hackathon) create the judge portal's record.
+      // The analysis pipeline still runs for every report so the progress page has
+      // stages to show regardless of whether a submission was filed. For managed
+      // work there is no submission, so the id args are left out (the pipeline and
+      // the detail views do not require them).
+      if (submitForHackathon) {
+        const candidateId = portalCandidateId(user.id, false);
+        const hackathonSubmission = await submitToHackathon({
+          hackathonId: target?.id ?? null,
+          candidateId,
+          teamName: teamName.trim() || project.name,
+          teamMembers,
+          description: project.description,
+          repoUrl: project.repo_url,
+          websiteUrl: project.website_url,
+          deckName: deckFile?.name ?? null,
+          projectId: project.id,
+          reportId: report.id,
+        });
+        await syncSubmissionProgress(hackathonSubmission.id, candidateId, {
+          status: "processing",
+        });
+
+        startAnalysis({
+          projectId: project.id,
+          reportId: report.id,
+          name: project.name,
+          repoUrl: project.repo_url,
+          websiteUrl: project.website_url,
+          notes: project.description,
+          createdAt: report.created_at,
+          isGuestSubmission: false,
+          document: docAnalysisRef.current,
+          hackathonSubmissionId: hackathonSubmission.id,
+          candidateId,
+        });
+
+        window.clearTimeout(stageTimer);
+        finishSubmission(project.id, report.id, project.name, hackathonSubmission.id);
+        return;
+      }
 
       startAnalysis({
         projectId: project.id,
@@ -491,12 +545,11 @@ function ReviewProject() {
         createdAt: report.created_at,
         isGuestSubmission: false,
         document: docAnalysisRef.current,
-        hackathonSubmissionId: hackathonSubmission.id,
-        candidateId,
       });
 
       window.clearTimeout(stageTimer);
-      finishSubmission(project.id, report.id, project.name, hackathonSubmission.id);
+      finishSubmission(project.id, report.id, project.name, null);
+      return;
     } catch (error) {
       window.clearTimeout(stageTimer);
       console.error(error);
